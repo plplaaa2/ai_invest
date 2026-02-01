@@ -1,4 +1,4 @@
-# 🤖 AI Analyst Lite (Home Assistant Add-on)
+# 🤖 AI Invest Lite (Home Assistant Add-on)
 
 **AI Analyst Lite**는 Home Assistant 환경에서 사용자가 지정한 RSS 피드의 뉴스를 수집하고, 로컬 LLM(Local LLM)을 연동하여 심도 있는 뉴스 요약 및 투자 보고서를 생성하는 도구입니다.
 
