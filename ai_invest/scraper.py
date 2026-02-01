@@ -1,0 +1,120 @@
+import feedparser
+import time
+import os
+import json
+import hashlib
+
+# --- 경로 설정 ---
+CONFIG_PATH = "/share/ai_analyst/rss_config.json"
+SAVE_PATH = "/share/ai_analyst/pending"
+
+def get_file_hash(text):
+    """중복 수집 방지를 위한 해시 생성"""
+    return hashlib.md5(text.encode('utf-8')).hexdigest()
+
+def save_file(entry):
+    """필터를 통과한 뉴스를 파일로 저장"""
+    os.makedirs(SAVE_PATH, exist_ok=True)
+    
+    title_hash = get_file_hash(entry.title)
+    fname = f"{SAVE_PATH}/{title_hash}.txt"
+    if os.path.exists(fname):
+        return
+
+    try:
+        with open(fname, "w", encoding="utf-8") as f:
+            f.write(f"제목: {entry.title}\n")
+            f.write(f"링크: {entry.link}\n")
+            f.write(f"날짜: {entry.get('published', '정보없음')}\n")
+            f.write(f"요약: {entry.get('summary', '내용없음')}")
+        print(f"📄 새 뉴스 저장됨: {entry.title[:20]}...")
+    except Exception as e:
+        print(f"❌ 파일 저장 실패: {e}")
+
+def check_logic(text, inc_list, exc_list):
+    """필터링 로직: 제외어 포함 시 탈락, 포함어 설정 시 포함되어야 통과"""
+    text = text.lower()
+    # 1. 제외 필터 (하나라도 걸리면 바로 탈락)
+    if any(x in text for x in exc_list if x):
+        return False
+    # 2. 포함 필터 (리스트가 비어있지 않을 때만 체크)
+    if inc_list:
+        if not any(i in text for i in inc_list if i):
+            return False
+    return True
+
+def cleanup_old_files(retention_days):
+    """설정된 보관 기간보다 오래된 파일을 삭제합니다."""
+    if not os.path.exists(SAVE_PATH):
+        return
+        
+    current_time = time.time()
+    # 1일 = 86400초
+    seconds_threshold = retention_days * 86400
+    
+    deleted_count = 0
+    for filename in os.listdir(SAVE_PATH):
+        file_path = os.path.join(SAVE_PATH, filename)
+        
+        # 파일 수정 시간 체크
+        if os.path.isfile(file_path) and filename.endswith(".txt"):
+            file_age = os.path.getmtime(file_path)
+            if (current_time - file_age) > seconds_threshold:
+                try:
+                    os.remove(file_path)
+                    deleted_count += 1
+                except Exception as e:
+                    print(f"❌ 파일 삭제 실패 ({filename}): {e}")
+                    
+    if deleted_count > 0:
+        print(f"🧹 보관 기간 만료로 {deleted_count}개의 뉴스 파일을 삭제했습니다. (기준: {retention_days}일)")
+
+def start_scraping():
+    print("🚀 뉴스 수집 엔진 가동 중 (전역 필터링 및 자동 삭제 시스템)...")
+    
+    while True:
+        # 1. 설정 및 전역 필터 로드 (기본 변수명 config 유지)
+        config = {"feeds": [], "update_interval": 10, "global_include": "", "global_exclude": "", "retention_days": 7}
+        if os.path.exists(CONFIG_PATH):
+            try:
+                with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+                    config.update(json.load(f))
+            except Exception as e:
+                print(f"⚠️ 설정 파일 로드 오류: {e}")
+        
+        interval = config.get("update_interval", 10)
+        retention_days = config.get("retention_days", 7)
+        
+        # [자동 삭제 로직 실행]
+        cleanup_old_files(retention_days)
+        
+        # 2. 전역 필터 키워드 리스트화
+        g_inc = [k.strip().lower() for k in config.get('global_include', "").split(",") if k.strip()]
+        g_exc = [k.strip().lower() for k in config.get('global_exclude', "").split(",") if k.strip()]
+
+        feeds = config.get("feeds", [])
+        if not feeds:
+            time.sleep(60); continue
+
+        # 3. 개별 피드 순회 및 수집
+        for feed in feeds:
+            try:
+                parsed = feedparser.parse(feed['url'])
+                l_inc = [k.strip().lower() for k in feed.get('include', "").split(",") if k.strip()]
+                l_exc = [k.strip().lower() for k in feed.get('exclude', "").split(",") if k.strip()]
+                
+                for entry in parsed.entries[:15]:
+                    # 제목 기준으로 필터링 (사용자 요청 반영)
+                    check_text = entry.title
+                    
+                    if not check_logic(check_text, g_inc, g_exc): continue
+                    if not check_logic(check_text, l_inc, l_exc): continue
+                    
+                    save_file(entry)
+            except: continue
+        
+        print(f"💤 {interval}분 후 업데이트 확인 및 파일 정리 예정...")
+        time.sleep(interval * 60)
+
+if __name__ == "__main__":
+    start_scraping()

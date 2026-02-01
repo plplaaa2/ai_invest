@@ -1,0 +1,21 @@
+name: "AI Invest"
+description: "개별 RSS 필터링 및 데스크탑 AI 연동 분석기"
+version: "1.0.3"
+slug: "ai_invest"
+arch:
+  - aarch64
+  - amd64
+startup: "services"
+# Ingress 및 패널 설정
+ingress: true
+ingress_port: 8501
+panel_icon: "mdi:chart-box-outline"
+panel_title: "AI Invest"
+# 파일 시스템 권한 (share 폴더 사용을 위해 필수)
+map:
+  - share:rw
+# 구성 옵션 및 스키마 정의
+options:
+  web_port: 8501
+schema:
+  web_port: int            # Streamlit 웹 UI 포트
