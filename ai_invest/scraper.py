@@ -11,54 +11,123 @@ CONFIG_PATH = "/share/ai_analyst/rss_config.json"
 SAVE_PATH = "/share/ai_analyst/pending"
 REPORTS_BASE_DIR = "/share/ai_analyst/reports"
 
+processed_titles = set()
+
 def get_file_hash(text):
     """중복 수집 방지를 위한 해시 생성"""
     return hashlib.md5(text.encode('utf-8')).hexdigest()
 
 def save_file(entry, feed_name):
-    os.makedirs(SAVE_PATH, exist_ok=True)
-    title_hash = hashlib.md5(entry.title.encode('utf-8')).hexdigest()
-    fname = f"{SAVE_PATH}/{title_hash}.txt"
+    """중복을 제거하고 뉴스를 파일로 저장합니다."""
+    global processed_titles
     
-    if os.path.exists(fname): return
+    # 1. 제목 정제 및 중복 판단용 키 생성
+    title = entry.title.strip()
+    # 공백과 특정 문구를 제거한 앞 18자로 유사도 체크
+    clean_key = title.replace("[특징주]", "").replace("[속보]", "").replace(" ", "")[:18]
+    
+    # 2. 2중 중복 체크 (메모리 캐시 or 물리 파일 존재 여부)
+    title_hash = hashlib.md5(title.encode('utf-8')).hexdigest()
+    fname = f"{PENDING_PATH}/{title_hash}.txt"
+    
+    if clean_key in processed_titles or os.path.exists(fname):
+        return False # 중복된 뉴스는 저장하지 않음
 
+    # 3. 날짜 처리 (없으면 현재 시간 사용)
     pub_date = entry.get('published') 
     if not pub_date:
         pub_date = datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
 
+    # 4. 파일 쓰기
     try:
         with open(fname, "w", encoding="utf-8") as f:
-            # ⚠️ app.py의 load_pending_files와 직결된 저장 순서 준수
-            f.write(f"제목: {entry.title}\n")
+            f.write(f"제목: {title}\n")
             f.write(f"링크: {entry.link}\n")
             f.write(f"날짜: {pub_date}\n")
             f.write(f"요약: {entry.get('summary', '내용 없음')}")
+        
+        processed_titles.add(clean_key)
+        return True
     except Exception as e:
         print(f"❌ 파일 저장 실패: {e}")
+        return False
 
 def check_logic(text, inc_list, exc_list):
+    """필터링 로직: 제외어 포함 시 탈락, 포함어 설정 시 포함되어야 통과"""
     text = text.lower()
-    if any(x in text for x in exc_list if x): return False
+    if any(x in text for x in exc_list if x):
+        return False
     if inc_list:
-        if not any(i in text for i in inc_list if i): return False
+        if not any(i in text for i in inc_list if i):
+            return False
     return True
 
 def cleanup_old_files(retention_days):
-    """설정된 보관 기간보다 오래된 뉴스 파일 삭제"""
-    if not os.path.exists(SAVE_PATH): return
+    """설정된 기간보다 오래된 파일 및 메모리 캐시 삭제"""
+    global processed_titles
+    if not os.path.exists(PENDING_PATH): return
+    
     current_time = time.time()
     seconds_threshold = retention_days * 86400
     deleted_count = 0
-    for filename in os.listdir(SAVE_PATH):
-        file_path = os.path.join(SAVE_PATH, filename)
+    
+    for filename in os.listdir(PENDING_PATH):
+        file_path = os.path.join(PENDING_PATH, filename)
         if os.path.isfile(file_path) and filename.endswith(".txt"):
             if (current_time - os.path.getmtime(file_path)) > seconds_threshold:
                 try:
                     os.remove(file_path)
                     deleted_count += 1
-                except: continue
+                except: pass
+    
+    # 파일 삭제 시 메모리 캐시도 함께 비워 시스템을 가볍게 유지
+    processed_titles.clear()
     if deleted_count > 0:
-        print(f"🧹 뉴스 파일 {deleted_count}개 삭제 완료 (기준: {retention_days}일)")
+        print(f"🧹 {deleted_count}개의 뉴스 파일을 정리하고 중복 필터를 초기화했습니다.")
+
+def start_scraping():
+    print("🚀 뉴스 수집 엔진 가동 중 (전역 필터링 및 2중 중복 제거 시스템)...")
+    
+    while True:
+        # 1. 설정 로드
+        config = {"feeds": [], "update_interval": 10, "retention_days": 7}
+        if os.path.exists(CONFIG_PATH):
+            try:
+                with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+                    config.update(json.load(f))
+            except: pass
+        
+        interval = config.get("update_interval", 10)
+        cleanup_old_files(config.get("retention_days", 7))
+        
+        g_inc = [k.strip().lower() for k in config.get('global_include', "").split(",") if k.strip()]
+        g_exc = [k.strip().lower() for k in config.get('global_exclude', "").split(",") if k.strip()]
+
+        # 2. 피드 순회
+        feeds = config.get("feeds", [])
+        total_found, new_saved = 0, 0
+
+        for feed in feeds:
+            try:
+                parsed = feedparser.parse(feed['url'])
+                l_inc = [k.strip().lower() for k in feed.get('include', "").split(",") if k.strip()]
+                l_exc = [k.strip().lower() for k in feed.get('exclude', "").split(",") if k.strip()]
+                
+                for entry in parsed.entries[:50]:
+                    total_found += 1
+                    if not check_logic(entry.title, g_inc, g_exc): continue
+                    if not check_logic(entry.title, l_inc, l_exc): continue
+                    
+                    if save_file(entry, feed['name']):
+                        new_saved += 1
+            except: continue
+        
+        # 3. 실시간 보고 로그
+        if total_found > 0:
+            print(f"📊 수집 현황: 발견 {total_found}개 | 신규 {new_saved}개 | 중복/필터 제외 {total_found - new_saved}개")
+        
+        print(f"💤 {interval}분 후 다시 확인합니다.")
+        time.sleep(interval * 60)
 
 def load_historical_contexts():
     """과거 리포트 맥락 로드 (RAG 기능)"""
@@ -183,3 +252,4 @@ if __name__ == "__main__":
                 
         except Exception as e: print(f"❌ 루프 에러: {e}")
         time.sleep(60)
+
