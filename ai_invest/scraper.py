@@ -219,37 +219,54 @@ def generate_auto_report(config_data):
     except Exception as e:
         print(f"🚨 [보고서 생성 중단] 원인: {str(e)}")
         return False
+        
+# --- 4. 메인 루프 가동 ---
 
-# --- [ 메인 루프 ] ---
 if __name__ == "__main__":
     last_news_time, last_auto_report_date = 0, datetime.now().strftime("%Y-%m-%d")
-    
-    if not os.path.exists(CONFIG_PATH):
-        print(f"🛠️ 기본 설정을 생성합니다: {CONFIG_PATH}")
-        save_data({"report_auto_gen": True, "report_gen_time": "08:00", "report_news_count": 100, "update_interval": 10, "feeds": []})
+    print(f"🚀 [AI Analyst Engine] 가동 시작")
 
     while True:
         try:
             now, current_ts = datetime.now(), time.time()
             if os.path.exists(CONFIG_PATH):
-                with open(CONFIG_PATH, "r", encoding="utf-8") as f: current_config = json.load(f)
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f: 
+                    current_config = json.load(f)
             else: continue
 
-            # 🎯 자동 보고서 로직 (지표 로드 구문 삭제됨)
+            # 🎯 [T1] 자동 보고서 생성 (지표 로드 로직 삭제)
             auto_gen_enabled = current_config.get("report_auto_gen", False)
             target_time_str = current_config.get("report_gen_time", "08:00")
             today_date_str = now.strftime("%Y-%m-%d")
             
             if auto_gen_enabled and now.strftime("%H:%M") == target_time_str and last_auto_report_date != today_date_str:
-                if generate_auto_report(current_config): last_auto_report_date = today_date_str
+                if generate_auto_report(current_config): 
+                    last_auto_report_date = today_date_str
 
-            # 🎯 뉴스 수집 엔진
+            # 🎯 [T2] 뉴스 수집 및 정제
             interval_sec = current_config.get("update_interval", 10) * 60
             if current_ts - last_news_time >= interval_sec:
                 cleanup_old_files(current_config.get("retention_days", 7))
-                # (여기에 실제 RSS 수집 루프 호출 추가 가능)
+                
+                # RSS 피드 순회 수집
+                feeds = current_config.get("feeds", [])
+                g_inc = [k.strip().lower() for k in current_config.get('global_include', "").split(",") if k.strip()]
+                g_exc = [k.strip().lower() for k in current_config.get('global_exclude', "").split(",") if k.strip()]
+
+                for feed in feeds:
+                    try:
+                        parsed = feedparser.parse(feed['url'])
+                        l_inc = [k.strip().lower() for k in feed.get('include', "").split(",") if k.strip()]
+                        l_exc = [k.strip().lower() for k in feed.get('exclude', "").split(",") if k.strip()]
+                        for entry in parsed.entries[:50]:
+                            if not check_logic(entry.title, g_inc, g_exc): continue
+                            if not check_logic(entry.title, l_inc, l_exc): continue
+                            save_file(entry, feed['name'])
+                    except: continue
                 last_news_time = current_ts
                 
-        except Exception as e: print(f"❌ 루프 에러: {e}")
+        except Exception as e: 
+            print(f"❌ 루프 에러: {e}")
         time.sleep(60)
+
 
