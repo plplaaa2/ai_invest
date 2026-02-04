@@ -16,9 +16,11 @@ processed_titles = set()
 def save_file(entry, feed_name):
     """중복을 제거하고 뉴스를 파일로 저장합니다."""
     global processed_titles
-    
+    os.makedirs(PENDING_PATH, exist_ok=True)
     # 1. 제목 정제 및 중복 판단용 키 생성
     title = entry.title.strip()
+    summary = entry.get('summary', '내용 없음')
+    current_content_len = len(title) + len(summary)
     # 공백과 특정 문구를 제거한 앞 18자로 유사도 체크
     clean_key = title.replace("[특징주]", "").replace("[속보]", "").replace(" ", "")[:18]
     
@@ -26,13 +28,20 @@ def save_file(entry, feed_name):
     title_hash = hashlib.md5(title.encode('utf-8')).hexdigest()
     fname = f"{PENDING_PATH}/{title_hash}.txt"
     
+# 🎯 중복 판단 시 '덮어쓰기' 전략 도입
     if clean_key in processed_titles or os.path.exists(fname):
-        return False # 중복된 뉴스는 저장하지 않음
+        # 이미 파일이 있다면 기존 파일의 크기를 확인합니다.
+        if os.path.exists(fname):
+            existing_size = os.path.getsize(fname)
+            # 💡 새 기사가 기존 기사보다 정보량(용량)이 더 많을 때만 교체합니다.
+            if current_content_len > existing_size:
+                pass # 아래 저장 로직으로 진행
+            else:
+                return False # 기존 기사가 더 알차므로 스킵
+        else:
+            return False # 메모리 캐시에만 있는 경우도 스킵
 
-    # 3. 날짜 처리 (없으면 현재 시간 사용)
-    pub_date = entry.get('published') 
-    if not pub_date:
-        pub_date = datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
+    pub_date = entry.get('published') or datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
 
     # 4. 파일 쓰기
     try:
@@ -264,6 +273,7 @@ if __name__ == "__main__":
         except Exception as e: 
             print(f"❌ 루프 에러: {e}")
         time.sleep(60)
+
 
 
 
