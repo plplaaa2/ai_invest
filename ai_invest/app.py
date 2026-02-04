@@ -39,7 +39,7 @@ def load_data():
             "name": "openai/gpt-oss-20b",
             "url": "http://192.168.1.105:11434/v1",
             "key": "",
-            "prompt": "시니어 투자 전략가로서 종합 의견을 제시하라."
+            "prompt": "투자 전략가로서 제공된 뉴스의 지표를 수집하여 표로 만들고 각 지표를 분석하여 전체 시황과 유동성 위기를 진단하고 투자자를 위한 섹터별 조언 및 총평을 하시오"
         },
 
         "report_news_count": 30,
@@ -710,4 +710,5 @@ elif st.session_state.active_menu == "AI":
 
     st.divider()
     st.caption("💾 최근 생성된 보고서는 /share/ai_analyst/reports 에 저장됩니다.")
+
 
