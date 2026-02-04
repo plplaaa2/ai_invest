@@ -122,5 +122,75 @@ def start_scraping():
         print(f"💤 {interval}분 후 업데이트 확인 및 파일 정리 예정...")
         time.sleep(interval * 60)
 
+# --- [5. 메인 루프] ---
 if __name__ == "__main__":
-    start_scraping()
+    # 💡 마지막 성공 데이터를 저장할 메모리 공간 (초기화)
+    last_prices = {} 
+    last_collect_time, last_news_time, last_auto_report_date = 0, 0, ""
+# 🎯 [핵심] 수집기를 켰을 때 오늘 날짜를 미리 넣어 정시 가동을 준비합니다.
+    last_auto_report_date = datetime.now().strftime("%Y-%m-%d")
+    print(f"🚀 [AI Analyst V3] 통합 수집기 가동 시작")
+
+# 🎯 [신규] 설정 파일 자동 생성 로직
+    if not os.path.exists(CONFIG_PATH):
+        print(f"🛠️ 설정 파일이 없습니다. 기본 설정을 생성합니다: {CONFIG_PATH}")
+        default_config = {
+            "report_auto_gen": True,         # 기본적으로 자동 생성 켬
+            "report_gen_time": "08:00",      # 기본 아침 8시
+            "report_news_count": 100,        # 뉴스 100개
+            "update_interval": 10,           # 10분 주기
+            "feeds": [],                     # 비어있는 피드 리스트
+            "analyst_model": {               # 5070 Ti에 최적화된 기본 모델 설정
+                "name": "openai/gpt-oss-20b",
+                "url": "http://192.168.1.105:11434/v1", 
+                "prompt": "당신은 전문 투자 전략가입니다. 지표와 뉴스를 분석하여 수익 전략을 제시하세요."
+            }
+        }
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(default_config, f, indent=4, ensure_ascii=False)
+        print(f"✅ 기본 설정 파일 생성 완료.")
+
+    while True:
+        try:
+            now, current_ts = datetime.now(), time.time()
+            # 최신 설정값 로드 (보고서 생성 시간, 자동 생성 여부 등)
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f: 
+                current_config = json.load(f)
+
+            # ---------------------------------------------------------
+            # 🎯 [T1: 자동 보고서 로직 복구]
+            # ---------------------------------------------------------
+            auto_gen_enabled = current_config.get("report_auto_gen", False)
+            target_time_str = current_config.get("report_gen_time", "08:00")
+            today_date_str = now.strftime("%Y-%m-%d")
+            current_time_str = now.strftime("%H:%M")
+
+            # 1. 자동 생성 활성화 여부 확인
+            # 2. 현재 시간이 설정된 시간(HH:MM)을 지났는지 확인
+            # 3. 오늘 이미 생성했는지 확인 (중복 생성 방지)
+            current_time_str = now.strftime("%H:%M")
+            
+            # 1. 자동 생성이 켜져 있고
+            # 2. 지금 시각이 설정한 시각과 정확히 일치하며 (또는 1분 이내 루프 시점)
+            # 3. 오늘 보고서를 발행한 적이 없을 때만 실행
+            if auto_gen_enabled and current_time_str == target_time_str and last_auto_report_date != today_date_str:
+                print(f"🤖 [{now.strftime('%H:%M:%S')}] 정시 보고서 생성 시각 도래: 분석 시작...")
+                
+                success = generate_auto_report(current_config)
+                
+                if success:
+                    print(f"✅ [{now.strftime('%H:%M:%S')}] 정기 보고서 박제 완료.")
+                    last_auto_report_date = today_date_str
+                else:
+                    print(f"⚠️ [{now.strftime('%H:%M:%S')}] 생성 실패 (1분 뒤 재시도)")
+            # ---------------------------------------------------------
+# [T3: 뉴스 수집] (수집 주기 설정값 반영)
+            update_interval_sec = current_config.get("update_interval", 10) * 60
+            if current_ts - last_news_time >= update_interval_sec:
+                # print(f"📰 뉴스 수집 엔진 가동...")
+                # fetch_all_rss_feeds() 함수 등 뉴스 수집 로직 호출
+                last_news_time = current_ts
+                
+        except Exception as e: 
+            print(f"❌ 루프 에러: {e}")
+        time.sleep(60)
