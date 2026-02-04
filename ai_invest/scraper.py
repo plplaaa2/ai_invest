@@ -12,24 +12,30 @@ def get_file_hash(text):
     """중복 수집 방지를 위한 해시 생성"""
     return hashlib.md5(text.encode('utf-8')).hexdigest()
 
-def save_file(entry):
-    """필터를 통과한 뉴스를 파일로 저장"""
+def save_file(entry, feed_name):
     os.makedirs(SAVE_PATH, exist_ok=True)
-    
-    title_hash = get_file_hash(entry.title)
+    # 제목 기반 해시로 파일명 생성
+    title_hash = hashlib.md5(entry.title.encode('utf-8')).hexdigest()
     fname = f"{SAVE_PATH}/{title_hash}.txt"
-    if os.path.exists(fname):
-        return
+    
+    if os.path.exists(fname): return
+
+    # 💡 RSS 날짜가 없으면 현재 시간(2026-02-02)을 기본값으로 사용
+    pub_date = entry.get('published') 
+    if not pub_date:
+        pub_date = datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
 
     try:
         with open(fname, "w", encoding="utf-8") as f:
+            # ⚠️ 아래 순서를 절대 바꾸지 마세요 (app.py의 load_pending_files와 직결됨)
             f.write(f"제목: {entry.title}\n")
             f.write(f"링크: {entry.link}\n")
-            f.write(f"날짜: {entry.get('published', '정보없음')}\n")
-            f.write(f"요약: {entry.get('summary', '내용없음')}")
-        print(f"📄 새 뉴스 저장됨: {entry.title[:20]}...")
+            f.write(f"날짜: {pub_date}\n") # 💡 3번째 줄에 날짜 기록
+            f.write(f"요약: {entry.get('summary', '내용 없음')}")
     except Exception as e:
         print(f"❌ 파일 저장 실패: {e}")
+
+
 
 def check_logic(text, inc_list, exc_list):
     """필터링 로직: 제외어 포함 시 탈락, 포함어 설정 시 포함되어야 통과"""
@@ -103,14 +109,14 @@ def start_scraping():
                 l_inc = [k.strip().lower() for k in feed.get('include', "").split(",") if k.strip()]
                 l_exc = [k.strip().lower() for k in feed.get('exclude', "").split(",") if k.strip()]
                 
-                for entry in parsed.entries[:15]:
+                for entry in parsed.entries[:50]:
                     # 제목 기준으로 필터링 (사용자 요청 반영)
                     check_text = entry.title
                     
                     if not check_logic(check_text, g_inc, g_exc): continue
                     if not check_logic(check_text, l_inc, l_exc): continue
                     
-                    save_file(entry)
+                    save_file(entry, feed['name'])
             except: continue
         
         print(f"💤 {interval}분 후 업데이트 확인 및 파일 정리 예정...")
