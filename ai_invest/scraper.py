@@ -13,10 +13,6 @@ REPORTS_BASE_DIR = "/share/ai_analyst/reports"
 
 processed_titles = set()
 
-def get_file_hash(text):
-    """중복 수집 방지를 위한 해시 생성"""
-    return hashlib.md5(text.encode('utf-8')).hexdigest()
-
 def save_file(entry, feed_name):
     """중복을 제거하고 뉴스를 파일로 저장합니다."""
     global processed_titles
@@ -268,5 +264,6 @@ if __name__ == "__main__":
         except Exception as e: 
             print(f"❌ 루프 에러: {e}")
         time.sleep(60)
+
 
 
