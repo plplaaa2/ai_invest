@@ -1,6 +1,6 @@
 name: "AI Invest Lite Add-on"
 description: "개별 RSS 필터링 및 데스크탑 AI 연동 분석기"
-version: "2.0.0"
+version: "2.1.0"
 slug: "ai_invest_lite"
 arch:
   - aarch64
