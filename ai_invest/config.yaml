@@ -19,6 +19,3 @@ options:
   web_port: 8501
 schema:
   web_port: int            # Streamlit 웹 UI 포트
-
-
-
