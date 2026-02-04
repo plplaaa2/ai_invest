@@ -30,7 +30,7 @@ def load_data():
             "name": "openai/gpt-oss-20b",
             "url": "http://192.168.1.2:1234/v1",
             "key": "",
-            "prompt": "투자 분석가입니다. 뉴스가 거시경제나 유동성에 중요한지 판독하여 0~5점을 매기세요."
+            "prompt": "투자 분석가입니다. 제공된 뉴스를 거시경제, 증시, 채권, 환율, 원자재로 분류하고 요약 후 0~5점을 매깁니다. 4점 이상은 상세 요약을 하며 요약 구조는 제목, 날짜, 출처, 분류, 요약, 점수 순으로 합니다."
         },
         
         # 🏛️ 투자 보고서 모델 설정 (Analyst)
@@ -710,3 +710,4 @@ elif st.session_state.active_menu == "AI":
 
     st.divider()
     st.caption("💾 최근 생성된 보고서는 /share/ai_analyst/reports 에 저장됩니다.")
+
