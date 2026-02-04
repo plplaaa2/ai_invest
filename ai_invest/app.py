@@ -15,57 +15,53 @@ CONFIG_PATH = "/share/ai_analyst/rss_config.json"
 PENDING_PATH = "/share/ai_analyst/pending"
 OPTIONS_PATH = "/data/options.json"
 
-def load_addon_config():
-    if os.path.exists(OPTIONS_PATH):
-        try:
-            with open(OPTIONS_PATH, "r", encoding='utf-8') as f:
-                return json.load(f)
-        except: pass
-    return {}
-
-def load_data():
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except: pass
-    return {"feeds": [], "update_interval": 10}
-# 기존 변수 선언 유지 
-config = load_addon_config() 
-data = load_data()
-
-# LLM 관련 변수 (HA 옵션에서 가져오기) 
-desktop_ip = data.get("desktop_ip")
-llm_api_port = data.get("llm_api_port")
-ai_model = data.get("ai_model")
-
 # --- 2. 뉴스 처리 핵심 함수 ---
-# --- [수정] load_data 함수: 초기 실행 시 기본값 보장 ---
 def load_data():
+    """설정 파일을 로드하며, 멀티 모델 구조를 지원하도록 생성합니다."""
     default_structure = {
         "feeds": [], 
         "update_interval": 10, 
-        "desktop_ip": "192.168.1.2",
-        "llm_api_port": "1234",
-        "ai_model": "openai/gpt-oss-20b",
-        "ai_prompt": "당신은 전문 금융 분석가입니다...",
-        "retention_days": 7
+        "view_range": "실시간",
+        "retention_days": 7,
+        
+        # 🎯 뉴스 판독 모델 설정 (Filter)
+        "filter_model": {
+            "provider": "Local",      # Local, Gemini, OpenAI 선택 가능
+            "name": "openai/gpt-oss-20b",
+            "url": "http://192.168.1.2:1234/v1",
+            "key": "",
+            "prompt": "투자 분석가입니다. 제공된 뉴스를 거시경제, 증시, 채권, 환율, 원자재로 분류하고 요약 후 0~5점을 매깁니다. 4점 이상은 상세 요약을 하며 요약 구조는 제목, 날짜, 출처, 분류, 요약, 점수 순으로 합니다."
+        },
+        
+        # 🏛️ 투자 보고서 모델 설정 (Analyst)
+        "analyst_model": {
+            "provider": "Local",
+            "name": "openai/gpt-oss-20b",
+            "url": "http://192.168.1.105:11434/v1",
+            "key": "",
+            "prompt": "시니어 투자 전략가로서 종합 의견을 제시하라."
+        },
+
+        "report_news_count": 30,
+        "report_auto_gen": False,
+        "report_gen_time": "08:00",
+        "report_days": 3
     }
+    
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-                loaded_data = json.load(f)
-                for key, value in default_structure.items():
-                    if key not in loaded_data: loaded_data[key] = value
-                return loaded_data
+                loaded = json.load(f)
+                # 💡 새로운 멀티 모델 구조가 없으면 기본값으로 채워넣음
+                for key, val in default_structure.items():
+                    if key not in loaded: 
+                        loaded[key] = val
+                return loaded
         except: pass
     return default_structure
 
-def save_data(data):
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
+# 초기 설정 로드
+data = load_data()
 
 # app.py 내의 is_filtered 함수를 이 내용으로 교체하세요.
 def is_filtered(title, summary, g_inc, g_exc, l_inc="", l_exc=""):
@@ -89,52 +85,116 @@ def is_filtered(title, summary, g_inc, g_exc, l_inc="", l_exc=""):
     
     return True
 
-def get_ai_summary(title, content, system_instruction=None):
-    # 전역 변수가 아닌 실시간 data 값을 사용하여 '저장' 즉시 반영되게 함
-    target_ip = data.get("desktop_ip")
-    target_port = data.get("llm_api_port")
-    target_model = data.get("ai_model")
+def load_historical_contexts():
+    """과거 리포트 맥락 로드 로직 [보존]"""
+    base_dir = REPORTS_BASE_DIR
+    dir_map = {
+        'YEARLY_STRATEGY': '04_yearly/latest.txt',
+        'MONTHLY_THEME': '03_monthly/latest.txt',
+        'WEEKLY_MOMENTUM': '02_weekly/latest.txt',
+        'DAILY_LOG': '01_daily/latest.txt'
+    }
     
-    url = f"http://{target_ip}:{target_port}/v1/chat/completions"
+    context_text = "### [ 역사적 맥락 참조 데이터 ]\n"
+    for label, rel_path in dir_map.items():
+        full_path = os.path.join(base_dir, rel_path)
+        if os.path.exists(full_path):
+            with open(full_path, "r", encoding="utf-8") as f:
+                content = f.read()
+                if len(content.strip()) > 10:
+                    context_text += f"\n<{label}>\n{content[:1000]}\n"
+                else:
+                    context_text += f"\n<{label}>: 해당 주기의 분석 데이터가 아직 비어 있습니다.\n"
+        else:
+            context_text += f"\n<{label}>: 데이터가 생성되지 않았습니다. 현재 데이터 중심으로 분석하십시오.\n"
+    return context_text
+
+# 초기 데이터 로드 실행
+data = load_data()
+
+# --- 2. 뉴스 처리 및 AI 분석 함수 ---
+def get_ai_summary(title, content, system_instruction=None, role="filter"):
+    # 🕒 현재 시간 확보 (한국 시간 기준)
+    now_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
-    if system_instruction:
-        final_role = system_instruction
-    else:
-        final_role = data.get("ai_prompt", "전문 투자 분석가입니다.")
+    # 설정 데이터(data)에서 역할에 맞는 모델 설정 로드
+    cfg = data.get("filter_model") if role == "filter" else data.get("analyst_model")
+    
+    base_url = cfg.get("url", "").rstrip('/')
+    url = f"{base_url}/chat/completions"
+    
+    # 💡 [보안/인증] API Key가 설정되어 있다면 헤더에 추가 (OpenAI 등 공용 API 대응)
+    headers = {}
+    if cfg.get("key"):
+        headers["Authorization"] = f"Bearer {cfg['key']}"
+    
+    # 시스템 프롬프트 구성: 현재 시간을 주입하여 AI가 시점 정보를 인지하게 함
+    user_prompt = system_instruction if system_instruction else cfg["prompt"]
+    final_role = f"현재 시각: {now_time}\n분석 지침: {user_prompt}"
 
     payload = {
-        "model": target_model,
+        "model": cfg["name"],
         "messages": [
             {"role": "system", "content": final_role},
-            {"role": "user", "content": f"제목: {title}\n본문: {content}"}
+            {"role": "user", "content": f"분석 기준 시각: {now_time}\n제목: {title}\n본문: {content}"}
         ],
         "temperature": 0.3
     }
-    
+
     try:
-        resp = requests.post(url, json=payload, timeout=120)
-        resp.raise_for_status()
+        # 대량 뉴스 처리를 위해 타임아웃 600초 유지
+        resp = requests.post(url, json=payload, headers=headers, timeout=600)
+        resp.raise_for_status() 
         return resp.json()['choices'][0]['message']['content']
+
+    except requests.exceptions.Timeout:
+        error_msg = f"❌ [TIMEOUT] AI 분석 시간이 초과되었습니다. (서버 응답 확인 필요)"
+        print(f"[{now_time}] {error_msg}")
+        return error_msg
+
+    except requests.exceptions.ConnectionError:
+        error_msg = f"❌ [CONNECTION] AI 서버({base_url})에 연결할 수 없습니다."
+        print(f"[{now_time}] {error_msg}")
+        return error_msg
+
     except Exception as e:
-        return f"❌ AI 서버 연결 실패 ({target_ip}:{target_port}): {str(e)}"
-    
+        error_msg = f"❌ [ERROR] AI 분석 중 예외 발생: {str(e)}"
+        print(f"[{now_time}] {error_msg}")
+        return error_msg
+        
+# [수정] 인자에 pub_dt(날짜)를 추가합니다.
 @st.dialog("📊 AI 정밀 분석 리포트")
-def show_analysis_dialog(title, summary_text):
-    # 창이 열리자마자 바로 분석 시작
-    with st.spinner("AI가 뉴스를 분석 중입니다..."):
-        # 기존 변수명 config, data를 사용하여 AI 호출
-        # 설정(data)에 저장된 ai_prompt를 시스템 프롬프트로 사용
-        analysis = get_ai_summary(title, summary_text)
+def show_analysis_dialog(title, summary_text, pub_dt, role="filter"): 
+    with st.spinner("AI가 뉴스를 심층 분석 중입니다..."):
+        # 💡 [전략] 기사 작성일(pub_dt)과 분석 시점(현재)의 간극을 AI가 인지하도록 제목 구성
+        enhanced_title = f"(기사작성일: {pub_dt}) {title}"
+        analysis = get_ai_summary(enhanced_title, summary_text, role=role)
     
+    # 상단 헤더 섹션
     st.markdown(f"### {title}")
+    st.caption(f"📅 기사 작성일: {pub_dt}") 
     st.divider()
+    
+    # AI 분석 본문
     st.markdown(analysis)
     st.divider()
     
-    # 하단에 원문 요약본 참고용으로 배치
+    # 하단 정보 및 원문 섹션
     with st.expander("기사 원문 요약 보기"):
         st.write(summary_text)
-    st.caption(f"🤖 모델: {config.get('ai_model')} | 분석 주관: AI Analyst")
+
+    # 🤖 모델 정보 및 분석 시각 (디버깅 및 신뢰도용)
+    model_cfg = data.get("filter_model" if role == "filter" else "analyst_model", {})
+    model_name = model_cfg.get("name", "Unknown Model")
+    
+    # 🕒 현재 분석 시각을 구해서 캡션에 추가
+    analysis_time = datetime.now().strftime('%H:%M:%S')
+    
+    st.caption(
+        f"🤖 분석 모델: {model_name} | "
+        f"🕒 분석 완료 시각: {analysis_time} | "
+        f"📊 역할: {'뉴스 필터링' if role == 'filter' else '심층 분석'}"
+    )
 
 def check_filters(title, include_str, exclude_str):
     title = title.lower().strip()
@@ -157,6 +217,17 @@ def parse_rss_date(date_str):
         p = feedparser._parse_date(date_str)
         return datetime.fromtimestamp(time.mktime(p))
     except: return datetime.now()
+
+def format_korean_unit(num):
+    """숫자를 조, 억 단위로 변환합니다."""
+    if num is None or num == 0: return "0"
+    if num >= 1e12:
+        return f"{num / 1e12:.2f}조"
+    elif num >= 1e8:
+        return f"{num / 1e8:.2f}억"
+    elif num >= 1e4:
+        return f"{num / 1e4:.1f}만"
+    return f"{num:,.0f}"
 
 def load_pending_files(range_type, target_feed=None):
     news_list = []
@@ -183,18 +254,67 @@ def load_pending_files(range_type, target_feed=None):
     return news_list
     
 def save_report_to_file(content, section_name):
-    # 보고서 저장용 폴더 생성
-    report_dir = "/share/ai_analyst/reports"
-    os.makedirs(report_dir, exist_ok=True)
+    """AI 보고서를 파일로 저장하고 주기에 따라 오래된 파일을 정제합니다."""
+    # 1. 경로 설정 및 폴더 세분화 (기존 경로 유지)
+    base_dir = "/share/ai_analyst/reports"
+    dir_map = {
+        'daily': '01_daily', 
+        'weekly': '02_weekly', 
+        'monthly': '03_monthly', 
+        'yearly': '04_yearly'
+    }
     
-    # 파일명 생성: 2026-01-31_2330_종합분석.txt
+    # section_name이 맵에 없으면 기본(etc) 폴더 사용
+    subdir = dir_map.get(section_name.lower(), "05_etc")
+    report_dir = os.path.join(base_dir, subdir)
+    os.makedirs(report_dir, exist_ok=True) # 폴더가 없으면 생성
+    
+    # 2. 파일명 생성 및 저장 (타임스탬프 기반 기록용)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     filename = f"{timestamp}_{section_name.replace(' ', '_')}.txt"
     filepath = os.path.join(report_dir, filename)
     
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(content)
+
+    # 3. 🎯 AI 참조용 Latest 파일 갱신 (RAG 분석용 고정 경로)
+    # 이 파일은 load_historical_contexts()에서 최신 맥락을 읽을 때 사용됩니다.
+    latest_path = os.path.join(report_dir, "latest.txt")
+    with open(latest_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    # 4. 🧹 계층형 자동 정제 (Purge) 로직
+    # 보관 규칙: Daily(7일), Weekly(30일), Monthly(365일)
+    purge_rules = {'01_daily': 7, '02_weekly': 30, '03_monthly': 365}
+    
+    if subdir in purge_rules:
+        limit_days = purge_rules[subdir]
+        # 현재 시간 기준으로 보관 한계 시점 계산
+        threshold = time.time() - (limit_days * 86400)
+        
+        for f in os.listdir(report_dir):
+            if f == "latest.txt": continue # 최신 맥락 파일은 보호
+            f_p = os.path.join(report_dir, f)
+            # 수정 시간(mtime)이 한계점보다 오래된 파일 삭제
+            if os.path.isfile(f_p) and os.path.getmtime(f_p) < threshold:
+                try:
+                    os.remove(f_p)
+                except Exception as e:
+                    print(f"파일 삭제 에러 ({f}): {e}")
+                
     return filepath
+    
+def save_data(data):
+    """변경된 설정 데이터를 JSON 파일로 안전하게 저장합니다."""
+    # 폴더가 없으면 자동으로 생성합니다.
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    
+    # 파일을 열어 딕셔너리 데이터를 기록합니다.
+    with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+        # 한글 깨짐 방지 및 가독성을 위해 옵션을 추가합니다.
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    # 2. 표시용 이름 딕셔너리
     
 # --- 3. UI 및 CSS 설정 ---
 st.set_page_config(page_title="AI Analyst", layout="wide")
@@ -204,101 +324,106 @@ st.markdown("""
     [data-testid="stPopoverBody"] { width: 170px !important; padding: 10px !important; }
     [data-testid="stPopoverBody"] button { padding: 2px 5px !important; margin-bottom: 2px !important; height: auto !important; font-size: 14px !important; }
     [data-testid="stSidebar"] { display: none; }
-    [data-testid="stMetricValue"] { font-size: 28px !important; }
+    /* 지표 관련 CSS는 필요 없으므로 stMetricValue 스타일은 삭제하거나 유지해도 무방합니다 */
     </style>
     """, unsafe_allow_html=True)
 
-data = load_data()
-if 'active_menu' not in st.session_state: st.session_state.active_menu = "뉴스"
-if 'current_feed_idx' not in st.session_state: st.session_state.current_feed_idx = "all"
-if 'page_number' not in st.session_state: st.session_state.page_number = 1
+# 초기 세션 상태 설정 (기본 메뉴를 "뉴스"로 변경)
+if 'active_menu' not in st.session_state: 
+    st.session_state.active_menu = "뉴스"
+if 'current_feed_idx' not in st.session_state: 
+    st.session_state.current_feed_idx = "all"
+if 'page_number' not in st.session_state: 
+    st.session_state.page_number = 1
 
-# --- 4. 최상단 대메뉴 ---
+# --- 4. 최상단 대메뉴 (시장 지표 제거) ---
 st.title("🤖 AI Analyst System")
+
+# 메뉴가 3개이므로 컬럼을 3개로 조정합니다.
 m_cols = st.columns(3)
-menu_items = [("📡 뉴스 스트리밍", "뉴스"), ("🏛️ AI 투자 보고서", "AI"), ("⚙️ 설정", "설정")]
+menu_items = [
+    ("📡 뉴스 스트리밍", "뉴스"), 
+    ("🏛️ AI 투자 보고서", "AI"), 
+    ("⚙️ 설정", "설정")
+]
 
 for i, (label, m_key) in enumerate(menu_items):
     if m_cols[i].button(label, use_container_width=True, type="primary" if st.session_state.active_menu == m_key else "secondary"):
-        st.session_state.active_menu = m_key; st.rerun()
+        st.session_state.active_menu = m_key
+        st.rerun()
 
 st.divider()
 
 # --- 5. 메뉴별 본문 화면 구성 ---
 
 if st.session_state.active_menu == "설정":
-    st.subheader("⚙️ 시스템 및 AI 서버 설정")
-    st.info("💡 보안이 필요한 AI 서버 및 DB 설정은 Home Assistant 애드온 구성 탭에서 수정하세요.")
+    st.subheader("⚙️ 로컬 멀티 AI 서버 및 시스템 설정")
     
-# AI 서버 설정 섹션 추가
-    with st.expander("🤖 로컬 AI 서버 설정", expanded=True):
-        col_ip, col_port = st.columns([0.7, 0.3])
-        new_ip = col_ip.text_input("데스크탑 IP 주소", value=data.get("desktop_ip", desktop_ip))
-        new_port = col_port.text_input("LLM API 포트", value=data.get("llm_api_port", llm_api_port))
-        new_model = st.text_input("사용할 AI 모델명", value=data.get("ai_model", ai_model))        
-        
-        if st.button("🚀 AI 서버 설정 저장", use_container_width=True):
-            data.update({
-                "desktop_ip": new_ip,
-                "llm_api_port": new_port,
-                "ai_model": new_model
-            })
-            save_data(data)
-            st.success("✅ AI 서버 접속 정보가 저장되었습니다.")
-            st.toast("AI 설정 반영 완료")
+    # 세 가지 설정 탭으로 통합 관리
+    tab_f, tab_a, tab_g = st.tabs(["🎯 뉴스 판독 (Filter)", "🏛️ 투자 분석 (Analyst)", "🌐 일반 설정"])
 
-    st.write("") # 간격 조절
-    
-   
-# --- 2. 뉴스 스트리밍 설정 섹션 ---
-    with st.container(border=True):
-        st.markdown("#### 📡 뉴스 스트리밍 설정")
+    with tab_f:
+        st.markdown("#### 📡 뉴스 스트리밍 요약용 모델")
+        f_cfg = data.get("filter_model")
+        # 고유 키: f_url_input
+        f_url = st.text_input("API 서버 주소 (URL)", value=f_cfg.get("url"), help="예: http://192.168.1.2:1234/v1", key="f_url_input")
+        f_name = st.text_input("모델명", value=f_cfg.get("name"), key="f_name_input")
+        f_prompt = st.text_area("기본 요약 지침", value=f_cfg.get("prompt"), height=100, key="f_prompt_input")
         
-        # AI 분석 프롬프트
-        default_prompt = "전문 투자 분석가입니다. 뉴스의 핵심 포인트 3가지를 분석하세요."
-        new_prompt = st.text_area(
-            "AI 분석 시스템 지침 (System Prompt)", 
-            value=data.get("ai_prompt", default_prompt),
-            height=150
-        )
+        if st.button("💾 판독 모델 설정 저장", use_container_width=True):
+            data["filter_model"].update({"url": f_url, "name": f_name, "prompt": f_prompt})
+            save_data(data); st.success("✅ 판독 모델 설정 저장 완료!")
+
+    with tab_a:
+        st.markdown("#### 🏛️ 투자 보고서 생성용 모델")
+        a_cfg = data.get("analyst_model")
+        # 고유 키: a_url_input
+        a_url = st.text_input("API 서버 주소 (URL)", value=a_cfg.get("url"), help="예: http://192.168.1.105:11434/v1", key="a_url_input")
+        a_name = st.text_input("모델명", value=a_cfg.get("name"), key="a_name_input")
         
-        col_ret, col_int = st.columns(2)
-        new_retention = col_ret.slider("뉴스 파일 보관 기간 (일)", 1, 30, data.get("retention_days", 7))
-        new_interval = col_int.number_input("RSS 수집 주기 (분)", 1, value=data.get("update_interval", 10))
+        if st.button("💾 분석 모델 설정 저장", use_container_width=True):
+            data["analyst_model"].update({"url": a_url, "name": a_name})
+            save_data(data); st.success("✅ 분석 모델 설정 저장 완료!")
+
+    with tab_g:
+        st.markdown("#### ⚙️ 시스템 공통 및 뉴스 수집 설정")
+        col1, col2 = st.columns(2)
         
-        if st.button("💾 뉴스 스트리밍 설정 저장", use_container_width=True, type="primary"):
+        # 1. 뉴스 수집 및 보관 설정
+        new_retention = col1.slider("뉴스 파일 보관 기간 (일)", 1, 30, value=data.get("retention_days", 7), key="cfg_retention_days")
+        new_interval = col2.number_input("RSS 수집 주기 (분)", 1, value=data.get("update_interval", 10), key="cfg_update_interval")
+        
+        st.divider()
+        
+        st.markdown("#### 📑 AI 투자 보고서 자동화")
+        # 2. 자동 생성 및 시간 설정
+        col_auto, col_time = st.columns([0.4, 0.6])
+        auto_gen = col_auto.toggle("매일 보고서 자동 생성", value=data.get("report_auto_gen", False), key="cfg_report_auto_gen")
+        gen_time = col_time.text_input("생성 시간 (24시간제, 예: 08:00)", value=data.get("report_gen_time", "08:00"), key="cfg_report_gen_time")
+        
+        # 3. 분석 뉴스 개수 설정 (최대 500개로 확장 및 날짜 범위 제거)
+        # 이제 AI는 날짜 범위 대신 '최신 뉴스 N개'와 '과거 리포트 맥락'으로만 분석합니다.
+        report_news_count = st.slider("분석 포함 뉴스 개수 (최대 500개)", 10, 500, value=data.get("report_news_count", 100), key="cfg_report_news_count")
+
+        if st.button("💾 모든 시스템 설정 저장", use_container_width=True, type="primary"):
+            # 데이터 구조 업데이트 (report_days 항목 제거)
             data.update({
-                "ai_prompt": new_prompt,
                 "retention_days": new_retention,
-                "update_interval": new_interval
+                "update_interval": new_interval,
+                "report_auto_gen": auto_gen,
+                "report_gen_time": gen_time,
+                "report_news_count": report_news_count
             })
+            # 필요 없는 구형 설정 키 삭제
+            if "report_days" in data:
+                del data["report_days"]
+                
             save_data(data)
-            st.success("✅ 뉴스 수집 및 프롬프트 설정이 저장되었습니다.")
-            st.toast("뉴스 설정 반영 완료")
+            st.success("✅ 불필요한 범위를 제거하고 뉴스 처리량이 500개로 확장되었습니다.")
+            st.rerun() 
 
     st.write("") # 간격 조절
-
-    # --- 3. 투자 보고서 설정 섹션 ---
-    with st.container(border=True):
-        st.markdown("#### 📑 AI 투자 보고서 설정")
-        report_days = st.number_input(
-            "분석 데이터 범위 (일 단위)", 
-            min_value=1, 
-            max_value=data.get("retention_days", 30), 
-            value=data.get("report_days", 3)
-        )
-
-        if st.button("📊 보고서 설정 저장", use_container_width=True):
-            data["report_days"] = report_days
-            save_data(data)
-            st.success("✅ 투자 보고서 범위 설정이 저장되었습니다.")
-
-    # --- 4. InfluxDB 정보 (읽기 전용) ---
-    with st.expander("ℹ️ 데이터베이스(InfluxDB) 연결 정보"):
-        st.info("데이터베이스 보안 설정은 HA 애드온의 '구성(Configuration)' 탭에서만 수정 가능합니다.")
-        st.code(f"URL: {config.get('influx_url')}\nOrg: home_assistant\nBucket: financial_data")
         
-
 
 # [2. 뉴스 스트리밍]
 elif st.session_state.active_menu == "뉴스":    
@@ -407,7 +532,7 @@ elif st.session_state.active_menu == "뉴스":
                     
                     # 2. AI 요약 분석 (클릭 즉시 분석 팝업 실행)
                     if btn_c2.button("🤖 AI 요약 분석", key=f"ai_btn_{entry.get('link')}", use_container_width=True):
-                        show_analysis_dialog(entry.get('title'), cleaned_summary)
+                        show_analysis_dialog(entry.get('title'), cleaned_summary, entry.get('published', '날짜 미상'), role="filter")
 
             st.divider()
             
@@ -446,7 +571,6 @@ elif st.session_state.active_menu == "뉴스":
         else:
             st.warning("📡 표시할 뉴스가 없습니다.")
 
-# [3. AI 투자 보고서]
 elif st.session_state.active_menu == "AI":
     st.subheader("📑 AI 투자 보고서")
     
@@ -456,20 +580,25 @@ elif st.session_state.active_menu == "AI":
     if "last_report_content" not in st.session_state:
         st.session_state.last_report_content = ""
 
+    # 경로 설정 (기존 유지)
     REPORT_DIR = "/share/ai_analyst/reports"
     os.makedirs(REPORT_DIR, exist_ok=True)
 
     # [신규 로직] 세션에 보고서가 없으면 저장된 파일 중 가장 최신 것 로드
     if not st.session_state.last_report_content:
-        report_files = sorted([f for f in os.listdir(REPORT_DIR) if f.startswith("Report_")], reverse=True)
+        # 파일 리스트 확보 (latest.txt 제외한 기록 파일들)
+        report_files = sorted([f for f in os.listdir(REPORT_DIR) if f.endswith(".txt") and "latest" not in f], reverse=True)
         if report_files:
             latest_file = report_files[0]
             try:
-                with open(os.path.join(REPORT_DIR, latest_file), "r", encoding="utf-8") as f:
-                    st.session_state.last_report_content = f.read()
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] 기존 보고서 자동 로드: {latest_file}")
-            except Exception as e:
-                print(f"[ERROR] 파일 로드 실패: {e}")
+                # 최신 파일이 존재하는 서브 디렉토리까지 찾기 위해 daily 폴더 확인
+                daily_dir = os.path.join(REPORT_DIR, "01_daily")
+                daily_files = sorted([f for f in os.listdir(daily_dir) if f.endswith(".txt")], reverse=True)
+                if daily_files:
+                    with open(os.path.join(daily_dir, daily_files[0]), "r", encoding="utf-8") as f:
+                        st.session_state.last_report_content = f.read()
+            except:
+                pass
 
     # 설정값 로드
     analysis_range = data.get("report_days", 3)
@@ -487,93 +616,98 @@ elif st.session_state.active_menu == "AI":
             key="report_instr_area"
         )
         
-        # [추가] 분석 지침 저장 버튼
+        # 분석 지침 저장 버튼
         if st.button("💾 분석 지침 저장", use_container_width=True):
             data["council_prompt"] = new_instruction
-            save_data(data) # 지침을 rss_config.json에 즉시 반영
+            save_data(data)
             st.success("✅ 분석 지침이 성공적으로 저장되었습니다.")
             st.toast("지침 저장 완료")
 
-        st.divider() # 시각적 구분선 추가
+        st.divider()
 
-        # 보고서 생성 버튼 (기존 로직 유지)
+        # 보고서 생성 버튼
         if st.button("🚀 새 종합 AI 보고서 생성", type="primary", use_container_width=True):
-            # 새 보고서 작성 시작 시 기존 데이터 초기화
             st.session_state.last_report_content = ""
             st.session_state.report_chat_history = []
             
-            with st.spinner("데이터 통합 분석 및 새 보고서 작성 중..."):
-                # [RAG] 전날 보고서 로드 (어제 날짜 파일 검색)
-                yesterday_str = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
-                yesterday_path = os.path.join(REPORT_DIR, f"Report_{yesterday_str}.txt")
-                yesterday_context = ""
-                if os.path.exists(yesterday_path):
-                    with open(yesterday_path, "r", encoding="utf-8") as f:
-                        yesterday_context = f.read()
-                
-                # [Metrics] InfluxDB 데이터 로드
-                metric_context = ""
-                try:
-                    client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
-                    query_api = client.query_api()
-                    m_query = f'from(bucket: "{INFLUX_BUCKET}") |> range(start: -24h) |> filter(fn: (r) => r._measurement == "financial_metrics" and r._field == "price") |> last()'
-                    tables = query_api.query(m_query)
-                    metrics = [f"- {r['symbol']}: {r.get_value():,.2f}" for t in tables for r in t.records]
-                    metric_context = "\n".join(metrics)
-                except: pass
+            with st.spinner("과거 맥락 복기 및 최신 뉴스 통합 분석 중..."):
+                # 1. [RAG] 과거 보고서 맥락 로드 (보존된 함수)
+                historical_context = load_historical_contexts()
 
-                # [News] 뉴스 데이터 로드
+                # 2. [News] 뉴스 데이터 로드 (DB 수치 로직 제거)
                 raw_news = load_pending_files("일주일") 
                 target_date = datetime.now() - timedelta(days=analysis_range)
+                
+                # 설정된 범위 내의 뉴스만 필터링
                 recent_news = [n for n in raw_news if n['pub_dt'] >= target_date]
-                news_context = "\n".join([f"- {n['title']}" for n in recent_news[:30]])
+                news_limit = data.get("report_news_count", 50)
+                
+                # AI에게 날짜, 출처, 제목 전달
+                news_items = []
+                for n in recent_news[:news_limit]:
+                    time_str = n['pub_dt'].strftime("%m/%d %H:%M")
+                    source = n.get('source', '뉴스')
+                    news_items.append(f"[{time_str}][{source}] {n['title']}")
+                
+                news_context = "### [ 최신 주요 뉴스 리스트 ]\n" + "\n".join(news_items)
 
-                if not news_context:
-                    st.warning("📡 분석할 뉴스가 없습니다.")
+                if not news_items:
+                    st.warning("📡 분석 범위 내에 최신 뉴스가 없습니다.")
                 else:
-                    # 프롬프트 구성
-                    full_instruction = f"{new_instruction}\n\n### [참조 데이터]\n"
-                    if yesterday_context: full_instruction += f"\n- 전날 분석 맥락 포함됨"
-                    if metric_context: full_instruction += f"\n- 실시간 지표:\n{metric_context}"
+                    # 🎯 프롬프트 재구성: DB 수치 대신 텍스트 맥락에 집중
+                    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    full_instruction = (
+                        f"현재 분석 시점: {now_str}\n"
+                        f"당신은 {new_instruction}\n\n"
+                        f"{historical_context}\n"
+                        f"지침: 위의 과거 전략 맥락을 참고하여, 아래 나열된 최신 뉴스가 시장에 미칠 영향을 분석하고 대응 전략을 수립하십시오."
+                    )
 
-                    # 보고서 생성
-                    report = get_ai_summary(title=f"{date.today()} 종합 전략", content=news_context, system_instruction=full_instruction)
-                    st.session_state.last_report_content = report
+                    # 심층 분석 모델(analyst role) 호출
+                    report = get_ai_summary(
+                        title=f"{date.today()} 종합 전략 보고서", 
+                        content=news_context, 
+                        system_instruction=full_instruction,
+                        role="analyst"
+                    )
                     
-                    # 저장 및 정리
-                    today_str = date.today().strftime("%Y-%m-%d")
-                    with open(os.path.join(REPORT_DIR, f"Report_{today_str}.txt"), "w", encoding="utf-8") as f:
-                        f.write(report)
-                    
-                    # 7일 경과 삭제
-                    current_time = time.time()
-                    for f in os.listdir(REPORT_DIR):
-                        f_p = os.path.join(REPORT_DIR, f)
-                        if os.path.isfile(f_p) and (current_time - os.path.getmtime(f_p) > 7 * 86400):
-                            os.remove(f_p)
-                    
+                    st.session_state.last_report_content = report   
+                    save_report_to_file(report, "daily")
                     st.rerun()
 
     # 3. 결과 출력 및 대화창
     if st.session_state.last_report_content:
         st.markdown("---")
-        st.markdown("#### 📊 투자 보고서")
+        st.markdown(f"#### 📊 투자 보고서")
+        
         with st.container(border=True):
             st.markdown(st.session_state.last_report_content)
 
-        # 채팅 섹션
+        # 💬 질의응답 내역 표시
         if st.session_state.report_chat_history:
             st.markdown("#### 💬 질의응답 내역")
             for message in st.session_state.report_chat_history:
                 with st.chat_message(message["role"]):
                     st.markdown(message["content"])
 
-        if chat_input := st.chat_input("보고서 내용에 대해 질문하세요."):
+        # ✉️ 채팅 입력 (DB 지표 주입 로직 제거)
+        if chat_input := st.chat_input("보고서 내용에 대해 궁금한 점을 질문하세요."):
+            now_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
             st.session_state.report_chat_history.append({"role": "user", "content": chat_input})
-            chat_context = f"당신은 이 보고서를 작성한 전문가입니다. 보고서 내용: {st.session_state.last_report_content}"
-            response = get_ai_summary(title="추가 질문", content=chat_input, system_instruction=chat_context)
+            
+            # 💡 [프롬프트] 보고서 텍스트 맥락 위주로 답변 유도
+            chat_context = (
+                f"당신은 이 보고서를 작성한 전문 투자 애널리스트입니다.\n"
+                f"현재 시각: {now_time}\n\n"
+                f"📝 [작성된 보고서 내용]\n{st.session_state.last_report_content}\n\n"
+                f"지침: 사용자가 위 보고서 내용에 대해 질문하고 있습니다. 보고서의 맥락을 유지하며 전문적으로 답변하십시오."
+            )
+            
+            response = get_ai_summary(title="보고서 내용 질의", content=chat_input, system_instruction=chat_context, role="analyst")
             st.session_state.report_chat_history.append({"role": "assistant", "content": response})
             st.rerun()
 
     st.divider()
-    st.caption("💾 최근 7일간의 보고서가 보관됩니다.")
+    st.caption("💾 최근 생성된 보고서는 /share/ai_analyst/reports 에 저장됩니다.")
+
