@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, date
 
 # --- 경로 설정 (기존 유지) ---
 CONFIG_PATH = "/share/ai_analyst/rss_config.json"
-SAVE_PATH = "/share/ai_analyst/pending"
+PENDING_PATH = "/share/ai_analyst/pending"
 REPORTS_BASE_DIR = "/share/ai_analyst/reports"
 
 processed_titles = set()
@@ -189,11 +189,11 @@ def generate_auto_report(config_data):
     # 🎯 [뉴스 로드] DB 지표 로직 삭제됨
     news_count = config_data.get("report_news_count", 100)
     news_ctx = f"### [ 금일 최신 뉴스 {news_count}선 ]\n"
-    if os.path.exists(SAVE_PATH):
-        pending_files = sorted(os.listdir(SAVE_PATH), reverse=True)[:news_count]
+    if os.path.exists(PENDING_PATH):
+        pending_files = sorted(os.listdir(PENDING_PATH), reverse=True)[:news_count]
         for f_name in pending_files:
             try:
-                with open(os.path.join(SAVE_PATH, f_name), "r", encoding="utf-8") as file:
+                with open(os.path.join(PENDING_PATH, f_name), "r", encoding="utf-8") as file:
                     news_ctx += f"- {file.readline().strip()}\n"
             except: continue
 
@@ -273,6 +273,7 @@ if __name__ == "__main__":
         except Exception as e: 
             print(f"❌ 루프 에러: {e}")
         time.sleep(60)
+
 
 
 
