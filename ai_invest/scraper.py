@@ -13,10 +13,13 @@ REPORTS_BASE_DIR = "/share/ai_analyst/reports"
 
 processed_titles = set()
 
+# 필수 디렉토리 생성 보장
+os.makedirs(PENDING_PATH, exist_ok=True)
+os.makedirs(REPORTS_BASE_DIR, exist_ok=True)
+
 def save_file(entry, feed_name):
     """중복을 제거하고 뉴스를 파일로 저장합니다."""
-    global processed_titles
-    os.makedirs(PENDING_PATH, exist_ok=True)
+    global processed_titles    
     # 1. 제목 정제 및 중복 판단용 키 생성
     title = entry.title.strip()
     summary = entry.get('summary', '내용 없음')
@@ -273,6 +276,7 @@ if __name__ == "__main__":
         except Exception as e: 
             print(f"❌ 루프 에러: {e}")
         time.sleep(60)
+
 
 
 
