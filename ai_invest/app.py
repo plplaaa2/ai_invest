@@ -14,6 +14,7 @@ import math
 CONFIG_PATH = "/share/ai_analyst/rss_config.json"
 PENDING_PATH = "/share/ai_analyst/pending"
 OPTIONS_PATH = "/data/options.json"
+REPORTS_BASE_DIR = "/share/ai_analyst/reports"
 
 # --- 2. 뉴스 처리 핵심 함수 ---
 def load_data():
@@ -85,6 +86,69 @@ def is_filtered(title, summary, g_inc, g_exc, l_inc="", l_exc=""):
     
     return True
 
+def save_report_to_file(content, section_name):
+    """AI 보고서를 파일로 저장하고 주기에 따라 오래된 파일을 정제합니다."""
+    # 1. 경로 설정 및 폴더 세분화 (기존 경로 유지)
+    base_dir = REPORTS_BASE_DIR
+    dir_map = {
+        'daily': '01_daily', 
+        'weekly': '02_weekly', 
+        'monthly': '03_monthly', 
+        'yearly': '04_yearly'
+    }
+    
+    # section_name이 맵에 없으면 기본(etc) 폴더 사용
+    subdir = dir_map.get(section_name.lower(), "05_etc")
+    report_dir = os.path.join(base_dir, subdir)
+    os.makedirs(report_dir, exist_ok=True) # 폴더가 없으면 생성
+    
+    # 2. 파일명 생성 및 저장 (타임스탬프 기반 기록용)
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+    filename = f"{timestamp}_{section_name.replace(' ', '_')}.txt"
+    filepath = os.path.join(report_dir, filename)
+    
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    # 3. 🎯 AI 참조용 Latest 파일 갱신 (RAG 분석용 고정 경로)
+    # 이 파일은 load_historical_contexts()에서 최신 맥락을 읽을 때 사용됩니다.
+    latest_path = os.path.join(report_dir, "latest.txt")
+    with open(latest_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    # 4. 🧹 계층형 자동 정제 (Purge) 로직
+    # 보관 규칙: Daily(7일), Weekly(30일), Monthly(365일)
+    purge_rules = {'01_daily': 7, '02_weekly': 30, '03_monthly': 365}
+    
+    if subdir in purge_rules:
+        limit_days = purge_rules[subdir]
+        # 현재 시간 기준으로 보관 한계 시점 계산
+        threshold = time.time() - (limit_days * 86400)
+        
+        for f in os.listdir(report_dir):
+            if f == "latest.txt": continue # 최신 맥락 파일은 보호
+            f_p = os.path.join(report_dir, f)
+            # 수정 시간(mtime)이 한계점보다 오래된 파일 삭제
+            if os.path.isfile(f_p) and os.path.getmtime(f_p) < threshold:
+                try:
+                    os.remove(f_p)
+                except Exception as e:
+                    print(f"파일 삭제 에러 ({f}): {e}")
+                
+    return filepath
+    
+def save_data(data):
+    """변경된 설정 데이터를 JSON 파일로 안전하게 저장합니다."""
+    # 폴더가 없으면 자동으로 생성합니다.
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    
+    # 파일을 열어 딕셔너리 데이터를 기록합니다.
+    with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+        # 한글 깨짐 방지 및 가독성을 위해 옵션을 추가합니다.
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    # 2. 표시용 이름 딕셔너리
+    
 def load_historical_contexts():
     """과거 리포트 맥락 로드 로직 [보존]"""
     base_dir = REPORTS_BASE_DIR
@@ -252,69 +316,8 @@ def load_pending_files(range_type, target_feed=None):
             except: continue
     news_list.sort(key=lambda x: x['pub_dt'], reverse=True)
     return news_list
-    
-def save_report_to_file(content, section_name):
-    """AI 보고서를 파일로 저장하고 주기에 따라 오래된 파일을 정제합니다."""
-    # 1. 경로 설정 및 폴더 세분화 (기존 경로 유지)
-    base_dir = "/share/ai_analyst/reports"
-    dir_map = {
-        'daily': '01_daily', 
-        'weekly': '02_weekly', 
-        'monthly': '03_monthly', 
-        'yearly': '04_yearly'
-    }
-    
-    # section_name이 맵에 없으면 기본(etc) 폴더 사용
-    subdir = dir_map.get(section_name.lower(), "05_etc")
-    report_dir = os.path.join(base_dir, subdir)
-    os.makedirs(report_dir, exist_ok=True) # 폴더가 없으면 생성
-    
-    # 2. 파일명 생성 및 저장 (타임스탬프 기반 기록용)
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
-    filename = f"{timestamp}_{section_name.replace(' ', '_')}.txt"
-    filepath = os.path.join(report_dir, filename)
-    
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(content)
+  
 
-    # 3. 🎯 AI 참조용 Latest 파일 갱신 (RAG 분석용 고정 경로)
-    # 이 파일은 load_historical_contexts()에서 최신 맥락을 읽을 때 사용됩니다.
-    latest_path = os.path.join(report_dir, "latest.txt")
-    with open(latest_path, "w", encoding="utf-8") as f:
-        f.write(content)
-
-    # 4. 🧹 계층형 자동 정제 (Purge) 로직
-    # 보관 규칙: Daily(7일), Weekly(30일), Monthly(365일)
-    purge_rules = {'01_daily': 7, '02_weekly': 30, '03_monthly': 365}
-    
-    if subdir in purge_rules:
-        limit_days = purge_rules[subdir]
-        # 현재 시간 기준으로 보관 한계 시점 계산
-        threshold = time.time() - (limit_days * 86400)
-        
-        for f in os.listdir(report_dir):
-            if f == "latest.txt": continue # 최신 맥락 파일은 보호
-            f_p = os.path.join(report_dir, f)
-            # 수정 시간(mtime)이 한계점보다 오래된 파일 삭제
-            if os.path.isfile(f_p) and os.path.getmtime(f_p) < threshold:
-                try:
-                    os.remove(f_p)
-                except Exception as e:
-                    print(f"파일 삭제 에러 ({f}): {e}")
-                
-    return filepath
-    
-def save_data(data):
-    """변경된 설정 데이터를 JSON 파일로 안전하게 저장합니다."""
-    # 폴더가 없으면 자동으로 생성합니다.
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    
-    # 파일을 열어 딕셔너리 데이터를 기록합니다.
-    with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
-        # 한글 깨짐 방지 및 가독성을 위해 옵션을 추가합니다.
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-    # 2. 표시용 이름 딕셔너리
     
 # --- 3. UI 및 CSS 설정 ---
 st.set_page_config(page_title="AI Analyst", layout="wide")
@@ -710,5 +713,7 @@ elif st.session_state.active_menu == "AI":
 
     st.divider()
     st.caption("💾 최근 생성된 보고서는 /share/ai_analyst/reports 에 저장됩니다.")
+
+
 
 
