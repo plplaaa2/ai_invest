@@ -1,6 +1,7 @@
 name: "AI Invest Lite Add-on"
 description: "개별 RSS 필터링 및 데스크탑 AI 연동 분석기"
-version: "2.1.0"
+version: "2.1.1"
+url: "https://github.com/plplaaa2/ai_invest"
 slug: "ai_invest_lite"
 arch:
   - aarch64
@@ -19,3 +20,4 @@ options:
   web_port: 8501
 schema:
   web_port: int            # Streamlit 웹 UI 포트
+
