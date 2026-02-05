@@ -14,6 +14,7 @@ import math
 CONFIG_PATH = "/share/ai_analyst/rss_config.json"
 PENDING_PATH = "/share/ai_analyst/pending"
 OPTIONS_PATH = "/data/options.json"
+REPORTS_BASE_DIR = "/share/ai_analyst/reports"
 
 # --- 2. 뉴스 처리 핵심 함수 ---
 def load_data():
@@ -88,7 +89,7 @@ def is_filtered(title, summary, g_inc, g_exc, l_inc="", l_exc=""):
 def save_report_to_file(content, section_name):
     """AI 보고서를 파일로 저장하고 주기에 따라 오래된 파일을 정제합니다."""
     # 1. 경로 설정 및 폴더 세분화 (기존 경로 유지)
-    base_dir = "/share/ai_analyst/reports"
+    base_dir = REPORTS_BASE_DIR
     dir_map = {
         'daily': '01_daily', 
         'weekly': '02_weekly', 
@@ -150,7 +151,7 @@ def save_data(data):
     
 def load_historical_contexts():
     """과거 리포트 맥락 로드 로직 [보존]"""
-    base_dir = "/share/ai_analyst/reports"
+    base_dir = REPORTS_BASE_DIR
     dir_map = {
         'YEARLY_STRATEGY': '04_yearly/latest.txt',
         'MONTHLY_THEME': '03_monthly/latest.txt',
@@ -712,6 +713,7 @@ elif st.session_state.active_menu == "AI":
 
     st.divider()
     st.caption("💾 최근 생성된 보고서는 /share/ai_analyst/reports 에 저장됩니다.")
+
 
 
 
