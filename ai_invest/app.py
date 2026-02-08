@@ -336,7 +336,7 @@ if st.session_state.active_menu == "설정":
         
 
 # [2. 뉴스 스트리밍]
-elif st.session_state.active_menu == "뉴스":    
+if st.session_state.active_menu == "뉴스":    
     # 🎯 1. 사이드바 상태 관리 세션 초기화
     if 'show_rss_sidebar' not in st.session_state:
         st.session_state.show_rss_sidebar = False # 기본으로 닫아두어 광폭 화면 확보
@@ -744,6 +744,7 @@ elif st.session_state.active_menu == "AI":
             data["council_prompt"] = new_instr
             save_data(data)
             st.success("저장 완료")
+
 
 
 
