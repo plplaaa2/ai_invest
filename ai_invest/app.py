@@ -255,8 +255,8 @@ if 'page_number' not in st.session_state: st.session_state.page_number = 1
 
 # --- 4. 최상단 대메뉴 ---
 st.title("🤖 AI Analyst System")
-m_cols = st.columns(4)
-menu_items = [("📈 시장 지표", "시장"), ("📡 뉴스 스트리밍", "뉴스"), ("🏛️ AI 투자 보고서", "AI"), ("⚙️ 설정", "설정")]
+m_cols = st.columns(3)
+menu_items = [("📡 뉴스 스트리밍", "뉴스"), ("🏛️ AI 투자 보고서", "AI"), ("⚙️ 설정", "설정")]
 
 for i, (label, m_key) in enumerate(menu_items):
     if m_cols[i].button(label, width='stretch', type="primary" if st.session_state.active_menu == m_key else "secondary"):
@@ -744,6 +744,7 @@ elif st.session_state.active_menu == "AI":
             data["council_prompt"] = new_instr
             save_data(data)
             st.success("저장 완료")
+
 
 
 
