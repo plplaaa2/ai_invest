@@ -165,14 +165,19 @@ def generate_auto_report(config_data, r_type="daily"):
             files = sorted(os.listdir(PENDING_PATH), reverse=True)
             seen_keys = set()
             for f_name in files:
-                with open(os.path.join(PENDING_PATH, f_name), "r", encoding="utf-8") as file:
-                    title = file.readline().replace("제목:", "").strip()
-                    # 제목 18자 기반 중복 제거 로직
-                    clean_key = title.replace("[특징주]", "").replace("[속보]", "").replace(" ", "")[:18]
-                    if clean_key not in seen_keys:
-                        seen_keys.add(clean_key)
-                        raw_news_list.append(title)
-                    if len(raw_news_list) >= news_count: break
+               try:
+                  with open(os.path.join(PENDING_PATH, f_name), "r", encoding="utf-8") as file:
+                      news_data = json.load(file)
+                      title = file.readline().replace("제목:", "").strip()
+                      # 제목 18자 기반 중복 제거 로직
+                      clean_key = title.replace("[특징주]", "").replace("[속보]", "").replace(" ", "")[:18]
+                      if clean_key not in seen_keys:
+                          seen_keys.add(clean_key)
+                          raw_news_list.append(title)
+                      if len(raw_news_list) >= news_count: break
+               except Exception as e:
+                   print(f"⚠️ 파일 읽기 실패 ({f_name}): {e}")
+                   continue
 
         news_ctx = f"### [ 금일 주요 뉴스 {len(raw_news_list)}선 ]\n"
         news_ctx += "\n".join([f"- {t}" for t in raw_news_list])
@@ -323,6 +328,7 @@ if __name__ == "__main__":
             print(f"❌ 루프 에러: {e}")
             
         time.sleep(60)
+
 
 
 
