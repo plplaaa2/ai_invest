@@ -19,5 +19,5 @@ python3 -u /app/scraper.py &
 
 # 3. Streamlit 웹 UI 실행
 python3 -m streamlit run /app/app.py \
-    --server.port 8502 \
+    --server.port 8501 \
     --server.address 0.0.0.0
