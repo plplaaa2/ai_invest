@@ -678,7 +678,7 @@ elif st.session_state.active_menu == "AI":
                 st.markdown(message["content"])
 
 # 실시간 채팅 입력
-        if chat_input := st.chat_input("보고서 내용이나 현재 지표에 대해 질문하세요."):
+        if chat_input := st.chat_input("보고서 내용에 대해 질문하세요."):
             st.session_state.report_chat_history.append({"role": "user", "content": chat_input})
             
             # 1. 현재 시간 및 요일 정보 생성
@@ -744,6 +744,7 @@ elif st.session_state.active_menu == "AI":
             data["council_prompt"] = new_instr
             save_data(data)
             st.success("저장 완료")
+
 
 
 
