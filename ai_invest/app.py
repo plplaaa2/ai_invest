@@ -551,8 +551,7 @@ if st.session_state.active_menu == "뉴스":
 elif st.session_state.active_menu == "AI":
     st.subheader("📑 AI 투자 사령부 보고서")
     
-    # 1. 기초 설정 (기존 경로 및 세션 유지)
-    REPORT_DIR = "/share/local_ai_analyst/reports"
+    # 1. 기초 설정 (기존 경로 및 세션 유지)    
     DIR_MAP = {'daily': '01_daily', 'weekly': '02_weekly', 'monthly': '03_monthly'}
     
     if "report_chat_history" not in st.session_state:
@@ -744,6 +743,7 @@ elif st.session_state.active_menu == "AI":
             data["council_prompt"] = new_instr
             save_data(data)
             st.success("저장 완료")
+
 
 
 

@@ -203,7 +203,7 @@ def generate_auto_report(config_data, r_type="daily"):
 
     else:
         # --- [주간/월간 전용 과거 리포트 요약 로직] ---
-        daily_dir = "/share/local_ai_analyst/reports/01_daily"
+        daily_dir = "/share/ai_analyst/reports/01_daily"
         files = sorted([f for f in os.listdir(daily_dir) if f.endswith(".txt") and f != "latest.txt"], reverse=True)
         
         # 주간은 7개, 월간은 30개 파일 참조
@@ -309,7 +309,7 @@ if __name__ == "__main__":
 
                 # 2️⃣ [T+10분] 주간 보고서 (일요일 & 7일치 데이터 확인)
                 elif current_time_str == weekly_time_str and now_kst.weekday() == 6:
-                    daily_dir = "/share/local_ai_analyst/reports/01_daily"
+                    daily_dir = "/share/ai_analyst/reports/01_daily"
                     daily_files = [f for f in os.listdir(daily_dir) if f.endswith(".txt") and f != "latest.txt"]
                     
                     if len(daily_files) >= 7:
@@ -323,7 +323,7 @@ if __name__ == "__main__":
 
                 # 3️⃣ [T+20분] 월간 보고서 (매월 1일 & 20일치 데이터 확인)
                 elif current_time_str == monthly_time_str and now_kst.day == 1:
-                    daily_dir = "/share/local_ai_analyst/reports/01_daily"
+                    daily_dir = "/share/ai_analyst/reports/01_daily"
                     daily_files = [f for f in os.listdir(daily_dir) if f.endswith(".txt") and f != "latest.txt"]
                     
                     if len(daily_files) >= 20:
@@ -345,6 +345,7 @@ if __name__ == "__main__":
             print(f"❌ 루프 에러: {e}")
             
         time.sleep(60)
+
 
 
 
