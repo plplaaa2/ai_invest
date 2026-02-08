@@ -164,64 +164,86 @@ def parse_rss_date(date_str):
     except: return datetime.now()
 
 def load_pending_files(range_type, target_feed=None):
-    """기존 구조를 유지하며 JSON/TXT를 모두 지원하는 뉴스 로더"""
+    """
+    단계별 로그를 통해 원인을 파악하는 뉴스 로더
+    """
     news_list = []
-    if not os.path.exists(PENDING_PATH): 
+    if not os.path.exists(PENDING_PATH):
+        st.error(f"❌ 경로 미존재: {PENDING_PATH}")
         return news_list
         
-    today_date = date.today()
-    one_week_ago = get_now_kst() - timedelta(days=7)
+    # 🔍 로그 1: 물리적 파일 검색
+    all_files = os.listdir(PENDING_PATH)
+    target_files = [f for f in all_files if f.endswith(".json") or f.endswith(".txt")]
+    print(f"🔍 [STEP 1] 전체 파일: {len(all_files)}개 | 대상 확장자: {len(target_files)}개")
+
+    now_kst = get_now_kst()
+    today_date = now_kst.date()
+    # 시간대 정보 제거(naive) 버전 준비 (비교용)
+    one_week_ago = (now_kst - timedelta(days=7)).replace(tzinfo=None)
     
-    for filename in os.listdir(PENDING_PATH):
-        # JSON과 TXT 모두 지원
-        if not (filename.endswith(".json") or filename.endswith(".txt")):
-            continue
-            
+    parse_fail = 0
+    filter_fail = 0
+
+    for filename in target_files:
         fpath = os.path.join(PENDING_PATH, filename)
         try:
             with open(fpath, 'r', encoding='utf-8') as f:
                 if filename.endswith(".json"):
-                    # 🎯 신규 JSON 방식 파싱
                     data = json.load(f)
-                    title = data.get('title', '')
-                    link = data.get('link', '')
+                    title = data.get('title', '제목 없음')
                     pub_str = data.get('pub_dt', '')
+                    
+                    # 🎯 날짜 파싱 강화 (pub_dt_str 형식: %Y-%m-%d %H:%M:%S)
+                    try:
+                        pub_dt = datetime.strptime(pub_str, '%Y-%m-%d %H:%M:%S')
+                    except:
+                        # 파싱 실패 시 파일 수정 시간으로 강제 복구
+                        pub_dt = datetime.fromtimestamp(os.path.getmtime(fpath))
+                    
+                    link = data.get('link', '')
                     summary = data.get('summary', '')
                     source = data.get('source', '저장된 데이터')
-                    # 문자열 시간을 datetime으로 변환
-                    pub_dt = datetime.strptime(pub_str, '%Y-%m-%d %H:%M:%S')
                 else:
-                    # 🎯 기존 TXT 방식 파싱 (함수 보존)
                     lines = f.read().splitlines()
+                    if len(lines) < 3: continue
                     title = lines[0].replace("제목: ", "")
-                    link = lines[1].replace("링크: ", "")
                     pub_str = lines[2].replace("날짜: ", "")
-                    summary = "\n".join(lines[3:]).replace("요약: ", "")
                     pub_dt = parse_rss_date(pub_str)
+                    link = lines[1].replace("링크: ", "")
+                    summary = "\n".join(lines[3:]).replace("요약: ", "")
                     source = "저장된 데이터"
 
-                # 필터링 로직 (기존과 동일)
-                if range_type == "오늘" and pub_dt.date() != today_date: continue
-                if range_type == "일주일" and pub_dt < one_week_ago: continue
+                # 🔍 로그 2: 필터링 전 데이터 확보 확인
+                # 시간대 정보가 섞여 비교 에러가 나는 것을 방지
+                pub_dt_naive = pub_dt.replace(tzinfo=None) if pub_dt.tzinfo else pub_dt
+                
+                # 필터링 로직
+                if range_type == "오늘" and pub_dt_naive.date() != today_date:
+                    filter_fail += 1
+                    continue
+                if range_type == "일주일" and pub_dt_naive < one_week_ago:
+                    filter_fail += 1
+                    continue
                 
                 if target_feed:
-                    # 기존 check_filters 함수 활용
-                    if not check_filters(title, target_feed.get('include', ""), target_feed.get('exclude', "")): 
+                    if not check_filters(title, target_feed.get('include', ""), target_feed.get('exclude', "")):
+                        filter_fail += 1
                         continue
                 
-                # 기존 반환 딕셔너리 구조 유지
                 news_list.append({
-                    "title": title, 
-                    "link": link, 
-                    "published": pub_str, 
-                    "summary": summary, 
-                    "pub_dt": pub_dt, 
-                    "source": source
+                    "title": title, "link": link, "published": pub_str, 
+                    "summary": summary, "pub_dt": pub_dt_naive, "source": source
                 })
+
         except Exception as e:
+            parse_fail += 1
+            print(f"❌ [에러] {filename} 로드 실패: {e}")
             continue
             
-    # 최신순 정렬 (기존과 동일)
+    # 🔍 로그 3: 최종 결과 집계
+    print(f"✅ [STEP 2] 최종 로드: {len(news_list)}개 | 파싱실패: {parse_fail} | 기간/필터제외: {filter_fail}")
+    
     news_list.sort(key=lambda x: x['pub_dt'], reverse=True)
     return news_list
 
@@ -591,6 +613,15 @@ elif st.session_state.active_menu == "AI":
 
             # 🚀 보고서 생성 버튼
             if st.button(f"🚀 새 {r_type.upper()} 보고서 생성 ({r_days}일 분석)", type="primary", width='stretch', key=f"gen_{r_type}"):
+                st.info(f"🔍 시스템 경로 확인 중...")
+                abs_path = os.path.abspath(PENDING_PATH)
+                st.write(f"📍 현재 PENDING_PATH (절대경로): `{abs_path}`")
+                
+                if os.path.exists(abs_path):
+                    all_files = os.listdir(abs_path)
+                    st.write(f"📁 폴더 내 전체 파일 개수: {len(all_files)}개")
+                else:
+                    st.error(f"❌ 경로가 존재하지 않습니다: {abs_path}")
                 st.session_state.last_report_content = ""
                 st.session_state.report_chat_history = []
                 
@@ -601,19 +632,30 @@ elif st.session_state.active_menu == "AI":
 
 # [C] 뉴스 데이터 로드 (r_days 적용)
                     raw_news = load_pending_files("일주일")
+                    if not raw_news:
+                        st.error(f"📍 파일 {len(os.listdir(PENDING_PATH))}개 중 유효한 형식이 없습니다.")
+                        st.stop()
                     
-                    now = get_now_kst()
+                    now = datetime.now()
                     # 주말(토, 일)이나 월요일 아침에는 금요일(3일 전) 데이터까지 포함
-                    lookback_days = 3 if now.weekday() in [5, 6, 0] else 1                    
-                    news_target_date = now - timedelta(days=lookback_days)
+                    lookback_days = 3 if now.weekday() in [5, 6, 0] else 2           
+                    news_target_dt = now - timedelta(days=lookback_days)
                     
-                    recent_news = [n for n in raw_news if n['pub_dt'] >= news_target_date]
-                    # 뉴스 가독성을 위해 최신순 정렬 추가
-                    recent_news.sort(key=lambda x: x['pub_dt'], reverse=True)
-                    
+                    recent_news = [n for n in raw_news if n['pub_dt'].replace(tzinfo=None) >= news_target_dt]
+                    recent_news.sort(key=lambda x: x['pub_dt'], reverse=True)                    
+                   
                     news_limit = data.get("report_news_count", 100)
-                    news_items = [f"[{n['pub_dt'].strftime('%m/%d %H:%M')}][{n.get('source','채널')}] {n['title']}" for n in recent_news[:news_limit]]
-                    news_context = f"### [ 최근 {lookback_days}일 주요 뉴스 흐름 ]\n" + "\n".join(news_items)
+                    news_items = [f"[{n['pub_dt'].strftime('%m/%d %H:%M')}] {n['title']}" for n in recent_news]
+                    
+                    for n in recent_news[:news_limit]:
+                        # HTML 태그 제거 및 가독성 최적화
+                        title = n['title']
+                        summary = clean_html(n.get('summary', ''))[:150]
+                        time_str = n['pub_dt'].strftime('%Y-%m-%d %H:%M:%S')
+    
+                        news_items.append(f"[{time_str}] {title}\n   - 요약: {summary}")
+                    
+                    news_context = f"### [ 최근 주요 뉴스 데이터 ]\n" + "\n".join(news_items)
 
                     # [D] AI 보고서 생성 및 저장
                     council_instruction = data.get("council_prompt", "당신은 전문 금융 애널리스트입니다.")
@@ -638,18 +680,18 @@ elif st.session_state.active_menu == "AI":
                         "6. 주력/미래 산업 전망: 현재 주도주의 지속 가능성과 새롭게 부각되는 미래 먹거리 분석\n"
                         "7. 리스크 분석: 현재 시장의 최대 뇌관 및 잠재적 위험 요소 2~3가지 지적\n"
                         "8. 포트폴리오 및 전략: 구체적인 자산 배분 비중(%)과 사령관을 위한 투자 행동 지침 하달\n"
-                        "9. 수치 기록: 다음 보고서에서 참고하게 뉴스에서 수집한 수치를 기록\n"
+                        "9. 수치 기록: 다음 보고서에서 참고하게 뉴스에서 수집한 경제지표를 날짜와 함께 기록\n"
                     )
                     
                     # 프롬프트 구성: 지표(Fact)를 마지막에 배치하여 강조
                     full_instruction = (
-                        f"당신은 {council_instruction}\n\n"
-                        f"현재 시각: {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                        f"{analysis_guideline}\n"
+                        f"당신은 {council_instruction}\n"
+                        f"현재 시각: {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                        f"{analysis_guideline}\n\n"
                         f"--- [ 1. 과거 분석 기록 ] ---\n{historical_context}\n\n"
-                        f"--- [ 2. 최근 실시간 주요 뉴스 ] ---\n{news_context}\n\n"
-                        f"가장 최근 뉴스에 있는 수치를 기반으로 해석하고 보고서를 작성하라."
+                        f"--- [ 2. 분석 대상 뉴스 데이터 ] ---\n{news_context}\n\n"
                         f"{structure_instruction}\n"
+                        f"**주의: 반드시 위 뉴스 데이터에 명시된 수치와 사건을 바탕으로 보고서를 작성하라.**"
                     )
                     
                     # 실제 리포트 생성 (뉴스 본문은 content로 전달)
