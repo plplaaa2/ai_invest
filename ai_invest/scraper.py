@@ -1,65 +1,53 @@
-import feedparser
-import time
-import os
-import json
 import hashlib
-import requests
-from datetime import datetime, timedelta, date
-
-# --- 경로 설정 (기존 유지) ---
-CONFIG_PATH = "/share/ai_analyst/rss_config.json"
-PENDING_PATH = "/share/ai_analyst/pending"
-REPORTS_BASE_DIR = "/share/ai_analyst/reports"
+from common import *
 
 processed_titles = set()
 
-# 필수 디렉토리 생성 보장
-os.makedirs(PENDING_PATH, exist_ok=True)
-os.makedirs(REPORTS_BASE_DIR, exist_ok=True)
-
 def save_file(entry, feed_name):
-    """중복을 제거하고 뉴스를 파일로 저장합니다."""
-    global processed_titles    
-    # 1. 제목 정제 및 중복 판단용 키 생성
+    """개선된 타임라인 보존 저장 방식 (JSON)"""
+    global processed_titles
+    
     title = entry.title.strip()
-    summary = entry.get('summary', '내용 없음')
-    current_content_len = len(title) + len(summary)
-    # 공백과 특정 문구를 제거한 앞 18자로 유사도 체크
-    clean_key = title.replace("[특징주]", "").replace("[속보]", "").replace(" ", "")[:18]
+# 🎯 1. 발행 시간을 KST(한국 표준시)로 엄격하게 변환 [cite: 1, 4]
+    if hasattr(entry, 'published_parsed') and entry.published_parsed:
+        # UTC 기반 구조체 시간을 KST datetime 객체로 변환 [cite: 3, 4]
+        dt_obj = datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc).astimezone(KST)
+    else:
+        # 시간 정보가 없는 경우 현재 KST 시각 사용 
+        dt_obj = get_now_kst()
+    #dt_parsed = entry.get('published_parsed', time.localtime())
+    dt_str = time.strftime('%Y%m%d_%H%M%S', dt_parsed) # 파일명 정렬용
+    date_key = time.strftime('%Y%m%d', dt_parsed)     # 일별 중복 분리용
     
-    # 2. 2중 중복 체크 (메모리 캐시 or 물리 파일 존재 여부)
-    title_hash = hashlib.md5(title.encode('utf-8')).hexdigest()
-    fname = f"{PENDING_PATH}/{title_hash}.txt"
+    # 🎯 2. 중복 체크 키 강화 (날짜 + 제목 15자)
+    # 이제 날짜가 다르면 같은 제목이라도 별개 뉴스로 수집합니다.
+    clean_key = f"{date_key}_{title.replace(' ', '')[:15]}"
     
-# 🎯 중복 판단 시 '덮어쓰기' 전략 도입
-    if clean_key in processed_titles or os.path.exists(fname):
-        # 이미 파일이 있다면 기존 파일의 크기를 확인합니다.
-        if os.path.exists(fname):
-            existing_size = os.path.getsize(fname)
-            # 💡 새 기사가 기존 기사보다 정보량(용량)이 더 많을 때만 교체합니다.
-            if current_content_len > existing_size:
-                pass # 아래 저장 로직으로 진행
-            else:
-                return False # 기존 기사가 더 알차므로 스킵
-        else:
-            return False # 메모리 캐시에만 있는 경우도 스킵
-
-    pub_date = entry.get('published') or datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
-
-    # 4. 파일 쓰기
+    if clean_key in processed_titles:
+        return False
+    
+    # 🎯 3. 파일명에 시간 정보 주입 (정렬 최적화)
+    file_hash = hashlib.md5(title.encode()).hexdigest()[:6]
+    filename = f"{dt_str}_{file_hash}.json" # JSON 확장자 사용
+    filepath = os.path.join(PENDING_PATH, filename)
+    
+    # 🎯 4. 데이터 구조화 (AI 분석용 정보 확장)
+    news_data = {
+        "title": title,
+        "pub_dt": time.strftime('%Y-%m-%d %H:%M:%S', dt_parsed),
+        "source": feed_name,
+        "summary": entry.get('summary', '내용 없음'),
+        "link": entry.get('link', '')
+    }
+    
     try:
-        with open(fname, "w", encoding="utf-8") as f:
-            f.write(f"제목: {title}\n")
-            f.write(f"링크: {entry.link}\n")
-            f.write(f"날짜: {pub_date}\n")
-            f.write(f"요약: {entry.get('summary', '내용 없음')}")
-        
+        with open(filepath, "w", encoding='utf-8') as f:
+            json.dump(news_data, f, ensure_ascii=False, indent=2)
         processed_titles.add(clean_key)
         return True
-    except Exception as e:
-        print(f"❌ 파일 저장 실패: {e}")
+    except:
         return False
-
+        
 def check_logic(text, inc_list, exc_list):
     """필터링 로직: 제외어 포함 시 탈락, 포함어 설정 시 포함되어야 통과"""
     text = text.lower()
@@ -94,10 +82,10 @@ def cleanup_old_files(retention_days):
         print(f"🧹 {deleted_count}개의 뉴스 파일을 정리하고 중복 필터를 초기화했습니다.")
 
 def start_scraping():
-    print("🚀 뉴스 수집 엔진 가동 중 (전역 필터링 및 2중 중복 제거 시스템)...")
+    print("🚀 뉴스 수집 엔진 가동 중 (타임라인 보존 및 동적 중복 제거)...")
     
     while True:
-        # 1. 설정 로드
+        # 1. 설정 및 필터링 키워드 로드
         config = {"feeds": [], "update_interval": 10, "retention_days": 7}
         if os.path.exists(CONFIG_PATH):
             try:
@@ -107,6 +95,9 @@ def start_scraping():
         
         interval = config.get("update_interval", 10)
         cleanup_old_files(config.get("retention_days", 7))
+        
+        # 🎯 메모리 캐시(processed_titles)가 너무 커지지 않게 주기적으로 비워주거나 
+        # 최근 N개만 유지하는 로직을 고려할 수 있습니다. (현재는 실행 시 유지)
         
         g_inc = [k.strip().lower() for k in config.get('global_include', "").split(",") if k.strip()]
         g_exc = [k.strip().lower() for k in config.get('global_exclude', "").split(",") if k.strip()]
@@ -118,46 +109,30 @@ def start_scraping():
         for feed in feeds:
             try:
                 parsed = feedparser.parse(feed['url'])
+                # 피드별 개별 필터
                 l_inc = [k.strip().lower() for k in feed.get('include', "").split(",") if k.strip()]
                 l_exc = [k.strip().lower() for k in feed.get('exclude', "").split(",") if k.strip()]
                 
+                # 상위 50개 뉴스 확인
                 for entry in parsed.entries[:50]:
                     total_found += 1
+                    # 전역/개별 필터링 로직 (check_logic 함수는 기존 그대로 사용)
                     if not check_logic(entry.title, g_inc, g_exc): continue
                     if not check_logic(entry.title, l_inc, l_exc): continue
                     
                     if save_file(entry, feed['name']):
                         new_saved += 1
-            except: continue
+            except Exception as e:
+                print(f"❌ {feed.get('name')} 수집 중 에러: {e}")
+                continue
         
         # 3. 실시간 보고 로그
+        now_str = datetime.now().strftime('%H:%M:%S')
         if total_found > 0:
-            print(f"📊 수집 현황: 발견 {total_found}개 | 신규 {new_saved}개 | 중복/필터 제외 {total_found - new_saved}개")
+            print(f"[{now_str}] 📊 발견 {total_found}개 | 신규 {new_saved}개 | 필터/중복 제외 {total_found - new_saved}개")
         
-        print(f"💤 {interval}분 후 다시 확인합니다.")
+        # 💤 수집 주기는 유동적으로 (기본 10분)
         time.sleep(interval * 60)
-
-def load_historical_contexts():
-    """과거 리포트 맥락 로드 (RAG 기능)"""
-    dir_map = {
-        'YEARLY_STRATEGY': '04_yearly/latest.txt',
-        'MONTHLY_THEME': '03_monthly/latest.txt',
-        'WEEKLY_MOMENTUM': '02_weekly/latest.txt',
-        'DAILY_LOG': '01_daily/latest.txt'
-    }
-    context_text = "### [ 역사적 맥락 참조 데이터 ]\n"
-    for label, rel_path in dir_map.items():
-        full_path = os.path.join(REPORTS_BASE_DIR, rel_path)
-        if os.path.exists(full_path):
-            with open(full_path, "r", encoding="utf-8") as f:
-                content = f.read()
-                if len(content.strip()) > 10:
-                    context_text += f"\n<{label}>\n{content[:1000]}\n"
-                else:
-                    context_text += f"\n<{label}>: 데이터 비어 있음.\n"
-        else:
-            context_text += f"\n<{label}>: 이전 기록 없음. 현재 뉴스 위주로 분석하십시오.\n"
-    return context_text
 
 def save_report_to_file(content, section_name):
     """AI 보고서 계층형 저장 및 정제"""
@@ -182,100 +157,260 @@ def save_report_to_file(content, section_name):
                 os.remove(f_p)
     return filepath
 
-def generate_auto_report(config_data):
-    """DB 없이 뉴스 및 과거 맥락만으로 보고서 생성"""
-    if not os.path.exists(CONFIG_PATH): return False
+def generate_auto_report(config_data, r_type="daily"):
+    """
+    [통합 보고서 엔진] 
+    - 일간(daily): 7일 지표 + 당일 뉴스 분석
+    - 주간(weekly): 30일 지표 + 지난 7일치 리포트 요약
+    - 월간(monthly): 365일 지표 + 지난 30일치 리포트 요약
+    """
+    # 🎯 0. 기초 데이터 및 안전장치 확인
+    if not os.path.exists(CONFIG_PATH):
+        print(f"⏳ [대기] 설정 파일({CONFIG_PATH})이 없습니다. UI에서 설정을 저장해주세요.")
+        return False
+
+    now_kst = get_now_kst()
+    now_str = now_kst.strftime("%Y-%m-%d %H:%M")
+    historical_context = load_historical_contexts()
+
+    # 🎯 1. 리포트 타입별 지표 조회 기간 설정 [사령관님 지침 반영]
+    lookback_map = {"daily": 7, "weekly": 30, "monthly": 365}
+    lookback_days = lookback_map.get(r_type, 30)
     
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-    historical_context = load_historical_contexts() 
-
-    # 🎯 [뉴스 로드] DB 지표 로직 삭제됨
-    news_count = config_data.get("report_news_count", 100)
-    news_ctx = f"### [ 금일 최신 뉴스 {news_count}선 ]\n"
-    if os.path.exists(PENDING_PATH):
-        pending_files = sorted(os.listdir(PENDING_PATH), reverse=True)[:news_count]
-        for f_name in pending_files:
-            try:
-                with open(os.path.join(PENDING_PATH, f_name), "r", encoding="utf-8") as file:
-                    news_ctx += f"- {file.readline().strip()}\n"
-            except: continue
-
-    a_cfg = config_data.get("analyst_model", {})
-    payload = {
-        "model": a_cfg.get("name", "gpt-4o"),
-        "messages": [
-            {
-                "role": "system", 
-                "content": f"현재시각: {now_str}\n{a_cfg.get('prompt', '전문 전략가로서 분석하라.')}\n\n{historical_context}"
-            },
-            {
-                "role": "user", 
-                "content": f"아래 최신 뉴스의 흐름을 과거 맥락과 결합하여 오늘 리포트를 작성하라.\n\n{news_ctx}"
-            }
-        ], 
-        "temperature": 0.3
-    }
-
+    metric_ctx = f"### [ 지난 {lookback_days}일간의 지표 추세 및 현재가 ]\n"
     try:
-        url = f"{a_cfg.get('url').rstrip('/')}/chat/completions"
-        headers = {"Authorization": f"Bearer {a_cfg.get('key')}"} if a_cfg.get('key') else {}
+        query = (
+            f'from(bucket: "{INFLUX_BUCKET}") '
+            f'|> range(start: -{lookback_days}d) '
+            f'|> filter(fn: (r) => r._measurement == "financial_metrics" and r._field == "price")'
+        )
+        tables = client.query_api().query(query)
+        
+        symbol_history = {}
+        for t in tables:
+            for r in t.records:
+                sym = r['symbol']
+                if sym not in symbol_history: symbol_history[sym] = []
+                symbol_history[sym].append(r.get_value())
+
+        for sym, prices in symbol_history.items():
+            if not prices: continue
+            name = display_names.get(sym, sym)
+            start_p, end_p = prices[0], prices[-1]
+            diff_pct = ((end_p - start_p) / start_p * 100) if start_p != 0 else 0
+            metric_ctx += f"- {name}: {end_p:,.2f} ({lookback_days}일 변동: {diff_pct:+.2f}%)\n"
+    except Exception as e:
+        metric_ctx += f"지표 로드 실패: {e}\n"
+
+    # 🎯 2. 입력 데이터 구성 (일간 뉴스 vs 주간/월간 과거 리포트)
+    if r_type == "daily":
+        # --- [기존 뉴스 정제 로직] ---
+        news_count = config_data.get("report_news_count", 100)
+        raw_news_list = []
+        if os.path.exists(PENDING_PATH):
+            files = sorted(os.listdir(PENDING_PATH), reverse=True)
+            seen_keys = set()
+            for f_name in files:
+                with open(os.path.join(PENDING_PATH, f_name), "r", encoding="utf-8") as file:
+                    title = file.readline().replace("제목:", "").strip()
+                    # 제목 18자 기반 중복 제거 로직
+                    clean_key = title.replace("[특징주]", "").replace("[속보]", "").replace(" ", "")[:18]
+                    if clean_key not in seen_keys:
+                        seen_keys.add(clean_key)
+                        raw_news_list.append(title)
+                    if len(raw_news_list) >= news_count: break
+
+        news_ctx = f"### [ 금일 주요 뉴스 {len(raw_news_list)}선 ]\n"
+        news_ctx += "\n".join([f"- {t}" for t in raw_news_list])
+        input_content = f"{metric_ctx}\n\n{news_ctx}"
+        report_label = "일간(Daily)"
+
+    else:
+        # --- [주간/월간 전용 과거 리포트 요약 로직] ---
+        daily_dir = "/share/local_ai_analyst/reports/01_daily"
+        files = sorted([f for f in os.listdir(daily_dir) if f.endswith(".txt") and f != "latest.txt"], reverse=True)
+        
+        # 주간은 7개, 월간은 30개 파일 참조
+        target_count = 7 if r_type == "weekly" else 30
+        report_summary = f"### [ 지난 {target_count}일간의 분석 기록 요약 ]\n"
+        
+        for f_name in files[:target_count]:
+            with open(os.path.join(daily_dir, f_name), 'r', encoding='utf-8') as f:
+                # 각 일간 리포트의 핵심 500자 발췌
+                report_summary += f"\n- {f_name}: {f.read()[:500]}...\n"
+        
+        input_content = f"{metric_ctx}\n{report_summary}"
+        report_label = "주간(Weekly)" if r_type == "weekly" else "월간(Monthly)"
+
+    # 🎯 3. 하이브리드 AI 설정 (UI 프롬프트 매칭)
+    a_cfg = config_data.get("analyst_model", {})
+    base_url = a_cfg.get("url", "").rstrip('/')
+    model_name = a_cfg.get("name")
+    base_prompt = a_cfg.get("prompt", "당신은 전문 금융 분석가입니다.")
+    # r_type별 전용 프롬프트 우선 시도, 없으면 기본 프롬프트
+    final_prompt = f"현재 임무: {report_label} 투자 전략 보고서 작성\n\n{base_prompt}"
+    
+    oa_key = config.get("openai_api_key", "")
+    gm_key = config.get("gemini_api_key", "")
+
+    # 🎯 4. 페이로드 구성 및 호출
+    if "googleapis.com" in base_url or "gemini" in model_name.lower():
+        url = f"{base_url}/v1beta/models/{model_name}:generateContent?key={gm_key}"
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "contents": [{
+                "parts": [{"text": f"지침: {final_prompt}\n\n과거맥락: {historical_context}\n데이터:\n{input_content}"}]
+            }]
+        }
+    else:
+        url = f"{base_url}/chat/completions"
+        headers = {"Content-Type": "application/json"}
+        if oa_key and "gpt" in model_name.lower():
+            headers["Authorization"] = f"Bearer {oa_key}"
+            
+        payload = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": f"시각: {now_str}\n{final_prompt}\n{historical_context}"},
+                {"role": "user", "content": input_content}
+            ],
+            "temperature": a_cfg.get("temperature", 0.3)
+        }
+
+    # 🎯 5. 실행 및 계층형 저장 (Purge 자동 연동)
+    try:
         resp = requests.post(url, json=payload, headers=headers, timeout=300)
-        report_content = resp.json()['choices'][0]['message']['content']
-        save_report_to_file(report_content, "daily") 
-        print(f"[{now_str}] 🏛️ 뉴스 기반 자동 보고서 생성 완료")
+        resp.raise_for_status()
+        result = resp.json()
+        
+        report_content = result['candidates'][0]['content']['parts'][0]['text'] if "candidates" in result else result['choices'][0]['message']['content']
+        
+        # 사령관님의 save_report_to_file을 통해 폴더 분류 및 퍼지 실행
+        save_report_to_file(report_content, r_type)
+        print(f"[{now_str}] 🏛️ {r_type.upper()} 보고서 생성 완료 (지표기간: {lookback_days}일)")
         return True
     except Exception as e:
-        print(f"🚨 [보고서 생성 중단] 원인: {str(e)}")
+        print(f"🚨 [{r_type}] 생성 중단 원인: {str(e)}")
         return False
-        
-# --- 4. 메인 루프 가동 ---
 
+## --- [5. 메인 루프] ---
 if __name__ == "__main__":
-    last_news_time, last_auto_report_date = 0, datetime.now().strftime("%Y-%m-%d")
-    print(f"🚀 [AI Analyst Engine] 가동 시작")
+    last_prices = {} 
+    last_collect_time = 0
+    last_news_time = 0
+    last_fred_time = 0 
+    last_auto_report_date = ""
+    last_weekly_report_date = "" 
+    last_monthly_report_date = ""
+
+    print(f"🚀 [AI Analyst] 시스템 가동 - 기준 시각: {data.get('report_gen_time', '08:00')} (KST)")
 
     while True:
         try:
-            now, current_ts = datetime.now(), time.time()
-            if os.path.exists(CONFIG_PATH):
-                with open(CONFIG_PATH, "r", encoding="utf-8") as f: 
-                    current_config = json.load(f)
-            else: continue
-
-            # 🎯 [T1] 자동 보고서 생성 (지표 로드 로직 삭제)
-            auto_gen_enabled = current_config.get("report_auto_gen", False)
-            target_time_str = current_config.get("report_gen_time", "08:00")
-            today_date_str = now.strftime("%Y-%m-%d")
+            now_kst = get_now_kst()
+            current_ts = time.time()
+            current_config = load_data() 
             
-            if auto_gen_enabled and now.strftime("%H:%M") == target_time_str and last_auto_report_date != today_date_str:
-                if generate_auto_report(current_config): 
-                    last_auto_report_date = today_date_str
+            # 🕒 실행 시각 설정 및 계산
+            base_time_str = str(current_config.get("report_gen_time", "08:00")).strip()
+            base_time = datetime.strptime(base_time_str, "%H:%M")
+            
+            # 10분, 20분 간격 순차 실행 시각
+            weekly_time_str = (base_time + timedelta(minutes=10)).strftime("%H:%M")
+            monthly_time_str = (base_time + timedelta(minutes=20)).strftime("%H:%M")
+            
+            current_time_str = now_kst.strftime("%H:%M")
+            auto_gen_enabled = current_config.get("report_auto_gen", False)
 
-            # 🎯 [T2] 뉴스 수집 및 정제
-            interval_sec = current_config.get("update_interval", 10) * 60
-            if current_ts - last_news_time >= interval_sec:
-                cleanup_old_files(current_config.get("retention_days", 7))
+            if auto_gen_enabled:
+                # 1️⃣ [T+0] 일간 보고서 (매일)
+                if current_time_str == base_time_str:
+                    if last_auto_report_date != now_kst.strftime("%Y-%m-%d"):
+                        print(f"🤖 [{now_kst.strftime('%H:%M:%S')}] (1/3) 일간 보고서 생성...")
+                        # r_type을 명시하여 common의 save_report_to_file과 연동
+                        if generate_auto_report(current_config, r_type="daily"):
+                            last_auto_report_date = now_kst.strftime("%Y-%m-%d")
+
+                # 2️⃣ [T+10분] 주간 보고서 (일요일 & 7일치 데이터 확인)
+                elif current_time_str == weekly_time_str and now_kst.weekday() == 6:
+                    daily_dir = "/share/local_ai_analyst/reports/01_daily"
+                    daily_files = [f for f in os.listdir(daily_dir) if f.endswith(".txt") and f != "latest.txt"]
+                    
+                    if len(daily_files) >= 7:
+                        current_week = now_kst.strftime("%Y-%U")
+                        if last_weekly_report_date != current_week:
+                            print(f"📅 [{now_kst.strftime('%H:%M:%S')}] (2/3) 주간 결산 리포트 생성...")
+                            if generate_auto_report(current_config, r_type="weekly"):
+                                last_weekly_report_date = current_week
+                    else:
+                        print(f"⚠️ 주간 리포트 스킵: 일간 데이터 부족 ({len(daily_files)}/7)")
+
+                # 3️⃣ [T+20분] 월간 보고서 (매월 1일 & 20일치 데이터 확인)
+                elif current_time_str == monthly_time_str and now_kst.day == 1:
+                    daily_dir = "/share/local_ai_analyst/reports/01_daily"
+                    daily_files = [f for f in os.listdir(daily_dir) if f.endswith(".txt") and f != "latest.txt"]
+                    
+                    if len(daily_files) >= 20:
+                        current_month = now_kst.strftime("%Y-%m")
+                        if last_monthly_report_date != current_month:
+                            print(f"🏛️ [{now_kst.strftime('%H:%M:%S')}] (3/3) 월간 결산 리포트 생성...")
+                            if generate_auto_report(current_config, r_type="monthly"):
+                                last_monthly_report_date = current_month
+                    else:
+                        print(f"⚠️ 월간 리포트 스킵: 일간 데이터 부족 ({len(daily_files)}/20)")
+            # --- [T2: 실시간 지표 수집 (10분 주기)] ---
+            if current_ts - last_collect_time >= 600:
+                # 1. 지수 및 일반 지표 수집
+                for sym, url in MARKET_CONFIG.items():
+                    res = fetch_api_data(sym, url)
+                    if res and res.get('price', 0) > 0: last_prices[sym] = res
                 
-                # RSS 피드 순회 수집
-                feeds = current_config.get("feeds", [])
-                g_inc = [k.strip().lower() for k in current_config.get('global_include', "").split(",") if k.strip()]
-                g_exc = [k.strip().lower() for k in current_config.get('global_exclude', "").split(",") if k.strip()]
 
-                for feed in feeds:
-                    try:
-                        parsed = feedparser.parse(feed['url'])
-                        l_inc = [k.strip().lower() for k in feed.get('include', "").split(",") if k.strip()]
-                        l_exc = [k.strip().lower() for k in feed.get('exclude', "").split(",") if k.strip()]
-                        for entry in parsed.entries[:50]:
-                            if not check_logic(entry.title, g_inc, g_exc): continue
-                            if not check_logic(entry.title, l_inc, l_exc): continue
-                            save_file(entry, feed['name'])
-                    except: continue
+                # 2. 환율 테이블 수집
+                for sym, url in TABLE_CONFIG.items():
+                    res = fetch_naver_table(sym, url)
+                    if res: last_prices[sym] = res
+
+
+                # 3. 수급 및 자금 수집
+                trends = fetch_investor_trends()
+                if trends: last_prices.update(trends)
+                funds = fetch_market_funds()
+                if funds: last_prices.update(funds)
+
+                # 💡 실시간 지표 DB 저장 (FRED 제외) [cite: 2026-01-22]
+                updated = 0
+                for sym, p_data in last_prices.items():
+                    if sym not in FRED_CONFIG:
+                        if save_to_influx(sym, p_data, now_kst): updated += 1
+                
+                print(f"📊 {now_kst.strftime('%H:%M:%S')} | 지표 갱신: {updated}건")
+                last_collect_time = current_ts
+
+            # --- [T3: 뉴스 수집] ---
+            update_interval_sec = current_config.get("update_interval", 10) * 60
+            if current_ts - last_news_time >= update_interval_sec:
+                # (RSS 수집 로직 호출부)
                 last_news_time = current_ts
+
+            # --- [T4: FRED 저변동 지표 수집 (1시간 주기)] ---
+            if current_ts - last_fred_time >= 3600:
+                print(f"🏛️ {now_kst.strftime('%H:%M:%S')} | FRED 매크로 지표 수집 시작...")
+                fred_updated = 0
+                for sym, sid in FRED_CONFIG.items():
+                    res = fetch_fred_keyless(sym, sid)
+                    if res:
+                        last_prices[sym] = res
+                        if save_to_influx(sym, res, now_kst): fred_updated += 1
+                
+                print(f"✅ FRED 지표 갱신 완료: {fred_updated}건")
+                last_fred_time = current_ts
                 
         except Exception as e: 
             print(f"❌ 루프 에러: {e}")
+            
         time.sleep(60)
+
 
 
 
