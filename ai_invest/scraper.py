@@ -15,9 +15,10 @@ def save_file(entry, feed_name):
     else:
         # 시간 정보가 없는 경우 현재 KST 시각 사용 
         dt_obj = get_now_kst()
-    #dt_parsed = entry.get('published_parsed', time.localtime())
+        
     dt_str = dt_obj.strftime('%Y%m%d_%H%M%S')# 파일명 정렬용
     date_key = dt_obj.strftime('%Y%m%d')     # 일별 중복 분리용
+    pub_dt_str = dt_obj.strftime('%Y-%m-%d %H:%M:%S') # 데이터 저장용
     
     # 🎯 2. 중복 체크 키 강화 (날짜 + 제목 15자)
     # 이제 날짜가 다르면 같은 제목이라도 별개 뉴스로 수집합니다.
@@ -34,7 +35,7 @@ def save_file(entry, feed_name):
     # 🎯 4. 데이터 구조화 (AI 분석용 정보 확장)
     news_data = {
         "title": title,
-        "pub_dt": time.strftime('%Y-%m-%d %H:%M:%S', dt_parsed),
+        "pub_dt": pub_dt_str, # [수정 완료]
         "source": feed_name,
         "summary": entry.get('summary', '내용 없음'),
         "link": entry.get('link', '')
@@ -322,6 +323,7 @@ if __name__ == "__main__":
             print(f"❌ 루프 에러: {e}")
             
         time.sleep(60)
+
 
 
 
