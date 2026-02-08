@@ -9,8 +9,7 @@ import feedparser
 from constants import *
 from datetime import datetime, timedelta, date, timezone
 from bs4 import BeautifulSoup
-from influxdb_client import InfluxDBClient, Point, WritePrecision
-from influxdb_client.client.write_api import SYNCHRONOUS
+ SYNCHRONOUS
 
 
 KST = timezone(timedelta(hours=9))
