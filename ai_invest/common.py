@@ -72,7 +72,7 @@ def save_to_influx(symbol, data, current_time):
     
 def save_report_to_file(content, section_name):
     # 1. 경로 설정 및 폴더 세분화
-    base_dir = "/share/local_ai_analyst/reports"
+    base_dir = "/share/ai_analyst/reports"
     dir_map = {
         'daily': '01_daily', 'weekly': '02_weekly', 
         'monthly': '03_monthly', 'yearly': '04_yearly'
@@ -111,7 +111,7 @@ def save_report_to_file(content, section_name):
     
 def load_historical_contexts():
     """파일이 없어도 에러 없이 작동하며, AI에게 현재 상황을 설명합니다."""
-    base_dir = "/share/local_ai_analyst/reports"
+    base_dir = "/share/ai_analyst/reports"
     dir_map = {
         'YEARLY_STRATEGY': '04_yearly/latest.txt',
         'MONTHLY_THEME': '03_monthly/latest.txt',
