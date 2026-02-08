@@ -358,34 +358,6 @@ if __name__ == "__main__":
                                 last_monthly_report_date = current_month
                     else:
                         print(f"⚠️ 월간 리포트 스킵: 일간 데이터 부족 ({len(daily_files)}/20)")
-            # --- [T2: 실시간 지표 수집 (10분 주기)] ---
-            if current_ts - last_collect_time >= 600:
-                # 1. 지수 및 일반 지표 수집
-                for sym, url in MARKET_CONFIG.items():
-                    res = fetch_api_data(sym, url)
-                    if res and res.get('price', 0) > 0: last_prices[sym] = res
-                
-
-                # 2. 환율 테이블 수집
-                for sym, url in TABLE_CONFIG.items():
-                    res = fetch_naver_table(sym, url)
-                    if res: last_prices[sym] = res
-
-
-                # 3. 수급 및 자금 수집
-                trends = fetch_investor_trends()
-                if trends: last_prices.update(trends)
-                funds = fetch_market_funds()
-                if funds: last_prices.update(funds)
-
-                # 💡 실시간 지표 DB 저장 (FRED 제외) [cite: 2026-01-22]
-                updated = 0
-                for sym, p_data in last_prices.items():
-                    if sym not in FRED_CONFIG:
-                        if save_to_influx(sym, p_data, now_kst): updated += 1
-                
-                print(f"📊 {now_kst.strftime('%H:%M:%S')} | 지표 갱신: {updated}건")
-                last_collect_time = current_ts
 
             # --- [T3: 뉴스 수집] ---
             update_interval_sec = current_config.get("update_interval", 10) * 60
@@ -410,6 +382,7 @@ if __name__ == "__main__":
             print(f"❌ 루프 에러: {e}")
             
         time.sleep(60)
+
 
 
 

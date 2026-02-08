@@ -249,7 +249,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 
-if 'active_menu' not in st.session_state: st.session_state.active_menu = "시장"
+if 'active_menu' not in st.session_state: st.session_state.active_menu = "뉴스"
 if 'current_feed_idx' not in st.session_state: st.session_state.current_feed_idx = "all"
 if 'page_number' not in st.session_state: st.session_state.page_number = 1
 
@@ -744,6 +744,7 @@ elif st.session_state.active_menu == "AI":
             data["council_prompt"] = new_instr
             save_data(data)
             st.success("저장 완료")
+
 
 
 
