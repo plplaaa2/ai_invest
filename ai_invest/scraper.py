@@ -84,59 +84,6 @@ def cleanup_old_files(retention_days):
     if deleted_count > 0:
         print(f"🧹 {deleted_count}개의 뉴스 파일을 정리하고 중복 필터를 초기화했습니다.")
 
-def start_scraping():
-    print("🚀 뉴스 수집 엔진 가동 중 (타임라인 보존 및 동적 중복 제거)...")
-    
-    while True:
-        # 1. 설정 및 필터링 키워드 로드
-        config = {"feeds": [], "update_interval": 10, "retention_days": 7}
-        if os.path.exists(CONFIG_PATH):
-            try:
-                with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-                    config.update(json.load(f))
-            except: pass
-        
-        interval = config.get("update_interval", 10)
-        cleanup_old_files(config.get("retention_days", 7))
-        
-        # 🎯 메모리 캐시(processed_titles)가 너무 커지지 않게 주기적으로 비워주거나 
-        # 최근 N개만 유지하는 로직을 고려할 수 있습니다. (현재는 실행 시 유지)
-        
-        g_inc = [k.strip().lower() for k in config.get('global_include', "").split(",") if k.strip()]
-        g_exc = [k.strip().lower() for k in config.get('global_exclude', "").split(",") if k.strip()]
-
-        # 2. 피드 순회
-        feeds = config.get("feeds", [])
-        total_found, new_saved = 0, 0
-
-        for feed in feeds:
-            try:
-                parsed = feedparser.parse(feed['url'])
-                # 피드별 개별 필터
-                l_inc = [k.strip().lower() for k in feed.get('include', "").split(",") if k.strip()]
-                l_exc = [k.strip().lower() for k in feed.get('exclude', "").split(",") if k.strip()]
-                
-                # 상위 50개 뉴스 확인
-                for entry in parsed.entries[:50]:
-                    total_found += 1
-                    # 전역/개별 필터링 로직 (check_logic 함수는 기존 그대로 사용)
-                    if not check_logic(entry.title, g_inc, g_exc): continue
-                    if not check_logic(entry.title, l_inc, l_exc): continue
-                    
-                    if save_file(entry, feed['name']):
-                        new_saved += 1
-            except Exception as e:
-                print(f"❌ {feed.get('name')} 수집 중 에러: {e}")
-                continue
-        
-        # 3. 실시간 보고 로그
-        now_str = datetime.now().strftime('%H:%M:%S')
-        if total_found > 0:
-            print(f"[{now_str}] 📊 발견 {total_found}개 | 신규 {new_saved}개 | 필터/중복 제외 {total_found - new_saved}개")
-        
-        # 💤 수집 주기는 유동적으로 (기본 10분)
-        time.sleep(interval * 60)
-
 def generate_auto_report(config_data, r_type="daily"):
     """
     [통합 보고서 엔진] - 단계별 디버그 로그 및 JSON 파싱 강화
@@ -333,6 +280,7 @@ if __name__ == "__main__":
             print(f"🚨 [{datetime.now().strftime('%H:%M:%S')}] 루프 치명적 에러: {e}")
             
         time.sleep(60)
+
 
 
 
