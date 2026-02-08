@@ -6,7 +6,6 @@ import requests
 import time
 import math
 import feedparser
-from constants import *
 from datetime import datetime, timedelta, date, timezone
 from bs4 import BeautifulSoup
  SYNCHRONOUS
