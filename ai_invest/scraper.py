@@ -69,7 +69,7 @@ def cleanup_old_files(retention_days):
     
     for filename in os.listdir(PENDING_PATH):
         file_path = os.path.join(PENDING_PATH, filename)
-        if os.path.isfile(file_path) and filename.endswith(".txt"):
+        if os.path.isfile(file_path) and (filename.endswith(".json") or filename.endswith(".txt")):
             if (current_time - os.path.getmtime(file_path)) > seconds_threshold:
                 try:
                     os.remove(file_path)
@@ -133,29 +133,6 @@ def start_scraping():
         
         # 💤 수집 주기는 유동적으로 (기본 10분)
         time.sleep(interval * 60)
-
-def save_report_to_file(content, section_name):
-    """AI 보고서 계층형 저장 및 정제"""
-    subdir = {'daily': '01_daily', 'weekly': '02_weekly', 'monthly': '03_monthly'}.get(section_name.lower(), "05_etc")
-    report_dir = os.path.join(REPORTS_BASE_DIR, subdir)
-    os.makedirs(report_dir, exist_ok=True)
-    
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
-    filepath = os.path.join(report_dir, f"{timestamp}_{section_name}.txt")
-    
-    with open(filepath, "w", encoding="utf-8") as f: f.write(content)
-    with open(os.path.join(report_dir, "latest.txt"), "w", encoding="utf-8") as f: f.write(content)
-
-    # 자동 정제
-    purge_rules = {'01_daily': 7, '02_weekly': 30, '03_monthly': 365}
-    if subdir in purge_rules:
-        threshold = time.time() - (purge_rules[subdir] * 86400)
-        for f in os.listdir(report_dir):
-            if f == "latest.txt": continue
-            f_p = os.path.join(report_dir, f)
-            if os.path.isfile(f_p) and os.path.getmtime(f_p) < threshold:
-                os.remove(f_p)
-    return filepath
 
 def generate_auto_report(config_data, r_type="daily"):
     """
@@ -345,6 +322,7 @@ if __name__ == "__main__":
             print(f"❌ 루프 에러: {e}")
             
         time.sleep(60)
+
 
 
 
