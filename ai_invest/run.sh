@@ -17,9 +17,6 @@ fi
 # 1. RSS 수집기 실행 (-u 옵션 추가)
 python3 -u /app/scraper.py &
 
-# 2. 주가 지수 수집기 실행 (-u 옵션 추가)
-python3 -u /app/stock_collector.py &
-
 # 3. Streamlit 웹 UI 실행
 python3 -m streamlit run /app/app.py \
     --server.port 8502 \
