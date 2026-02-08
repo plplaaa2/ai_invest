@@ -686,16 +686,6 @@ elif st.session_state.active_menu == "AI":
             days = ['월', '화', '수', '목', '금', '토', '일']
             current_time_info = f"{now.strftime('%Y-%m-%d %H:%M:%S')} ({days[now.weekday()]}요일)"
             
-            # 실시간 DB 지표 주입
-            all_metrics_text = ""
-            for sym in ALL_SYMBOLS:
-                m_data, p_hist, _, _ = get_metric_data(sym)
-                if m_data and 'price' in m_data:
-                    curr = m_data['price']
-                    prev = p_hist[0] if p_hist else curr
-                    diff = ((curr - prev) / prev * 100) if prev != 0 else 0
-                    all_metrics_text += f"- {display_names.get(sym, sym)}: {curr:,.2f} ({diff:+.2f}%)\n"
-            
             # 2. 페르소나 및 시간 정보가 포함된 시스템 컨텍스트
             chat_context = (
                 f"당신은 전문 금융 애널리스트입니다.\n"
@@ -754,6 +744,7 @@ elif st.session_state.active_menu == "AI":
             data["council_prompt"] = new_instr
             save_data(data)
             st.success("저장 완료")
+
 
 
 
