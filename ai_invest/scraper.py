@@ -16,8 +16,8 @@ def save_file(entry, feed_name):
         # 시간 정보가 없는 경우 현재 KST 시각 사용 
         dt_obj = get_now_kst()
     #dt_parsed = entry.get('published_parsed', time.localtime())
-    dt_str = time.strftime('%Y%m%d_%H%M%S', dt_parsed) # 파일명 정렬용
-    date_key = time.strftime('%Y%m%d', dt_parsed)     # 일별 중복 분리용
+    dt_str = dt_obj.strftime('%Y%m%d_%H%M%S')# 파일명 정렬용
+    date_key = dt_obj.strftime('%Y%m%d')     # 일별 중복 분리용
     
     # 🎯 2. 중복 체크 키 강화 (날짜 + 제목 15자)
     # 이제 날짜가 다르면 같은 제목이라도 별개 뉴스로 수집합니다.
@@ -322,6 +322,7 @@ if __name__ == "__main__":
             print(f"❌ 루프 에러: {e}")
             
         time.sleep(60)
+
 
 
 
