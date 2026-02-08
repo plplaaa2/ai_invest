@@ -37,28 +37,6 @@ def load_addon_config():
 config = load_addon_config() 
 
 
-# 지표 관련 변수 (HA Addon 구성에서 로드)
-INFLUX_URL = config.get("influx_url", "http://192.168.1.105:8086")
-INFLUX_TOKEN = config.get("influx_token", "")
-INFLUX_ORG = "home_assistant"
-INFLUX_BUCKET = "financial_data"
-
-client = None
-write_api = None
-query_api = None
-
-print(f"✅ InfluxDB 설정 로드 완료: {INFLUX_URL}")
-
-if INFLUX_TOKEN:
-    try:
-        client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
-        write_api = client.write_api(write_options=SYNCHRONOUS)
-        query_api = client.query_api()
-        print(f"✅ InfluxDB 연결 성공: {INFLUX_URL}")
-    except Exception as e:
-        print(f"❌ InfluxDB 연결 실패: {e}")
-
-
 # 키가 있는지 확인하는 로직
 openai_key = config.get("openai_api_key", "")
 gemini_key = config.get("gemini_api_key", "")
