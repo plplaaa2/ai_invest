@@ -21,7 +21,7 @@ def get_now_kst():
 
 # --- [0. 시스템 공통 경로 설정] ---
 OPTIONS_PATH = "/data/options.json"
-BASE_PATH = "/share/local_ai_analyst"
+BASE_PATH = "/share/ai_analyst"
 CONFIG_PATH = os.path.join(BASE_PATH, "rss_config.json")
 PENDING_PATH = os.path.join(BASE_PATH, "pending")
 REPORT_DIR = os.path.join(BASE_PATH, "reports")
