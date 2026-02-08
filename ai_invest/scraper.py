@@ -177,31 +177,7 @@ def generate_auto_report(config_data, r_type="daily"):
     lookback_map = {"daily": 7, "weekly": 30, "monthly": 365}
     lookback_days = lookback_map.get(r_type, 30)
     
-    metric_ctx = f"### [ 지난 {lookback_days}일간의 지표 추세 및 현재가 ]\n"
-    try:
-        query = (
-            f'from(bucket: "{INFLUX_BUCKET}") '
-            f'|> range(start: -{lookback_days}d) '
-            f'|> filter(fn: (r) => r._measurement == "financial_metrics" and r._field == "price")'
-        )
-        tables = client.query_api().query(query)
-        
-        symbol_history = {}
-        for t in tables:
-            for r in t.records:
-                sym = r['symbol']
-                if sym not in symbol_history: symbol_history[sym] = []
-                symbol_history[sym].append(r.get_value())
-
-        for sym, prices in symbol_history.items():
-            if not prices: continue
-            name = display_names.get(sym, sym)
-            start_p, end_p = prices[0], prices[-1]
-            diff_pct = ((end_p - start_p) / start_p * 100) if start_p != 0 else 0
-            metric_ctx += f"- {name}: {end_p:,.2f} ({lookback_days}일 변동: {diff_pct:+.2f}%)\n"
-    except Exception as e:
-        metric_ctx += f"지표 로드 실패: {e}\n"
-
+    
     # 🎯 2. 입력 데이터 구성 (일간 뉴스 vs 주간/월간 과거 리포트)
     if r_type == "daily":
         # --- [기존 뉴스 정제 로직] ---
@@ -222,7 +198,7 @@ def generate_auto_report(config_data, r_type="daily"):
 
         news_ctx = f"### [ 금일 주요 뉴스 {len(raw_news_list)}선 ]\n"
         news_ctx += "\n".join([f"- {t}" for t in raw_news_list])
-        input_content = f"{metric_ctx}\n\n{news_ctx}"
+        input_content = f"{news_ctx}\n"
         report_label = "일간(Daily)"
 
     else:
@@ -239,7 +215,7 @@ def generate_auto_report(config_data, r_type="daily"):
                 # 각 일간 리포트의 핵심 500자 발췌
                 report_summary += f"\n- {f_name}: {f.read()[:500]}...\n"
         
-        input_content = f"{metric_ctx}\n{report_summary}"
+        input_content = f"{report_summary}\n"
         report_label = "주간(Weekly)" if r_type == "weekly" else "월간(Monthly)"
 
     # 🎯 3. 하이브리드 AI 설정 (UI 프롬프트 매칭)
@@ -364,24 +340,12 @@ if __name__ == "__main__":
             if current_ts - last_news_time >= update_interval_sec:
                 # (RSS 수집 로직 호출부)
                 last_news_time = current_ts
-
-            # --- [T4: FRED 저변동 지표 수집 (1시간 주기)] ---
-            if current_ts - last_fred_time >= 3600:
-                print(f"🏛️ {now_kst.strftime('%H:%M:%S')} | FRED 매크로 지표 수집 시작...")
-                fred_updated = 0
-                for sym, sid in FRED_CONFIG.items():
-                    res = fetch_fred_keyless(sym, sid)
-                    if res:
-                        last_prices[sym] = res
-                        if save_to_influx(sym, res, now_kst): fred_updated += 1
-                
-                print(f"✅ FRED 지표 갱신 완료: {fred_updated}건")
-                last_fred_time = current_ts
                 
         except Exception as e: 
             print(f"❌ 루프 에러: {e}")
             
         time.sleep(60)
+
 
 
 
