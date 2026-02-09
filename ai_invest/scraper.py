@@ -107,13 +107,10 @@ def generate_auto_report(config_data, r_type="daily"):
     return _execute_report_ai_engine(config_data, r_type, report_label, input_content)
 
 def _prepare_daily_report_data(config_data, now_kst):
-    """일간 보고서용 데이터 구성 (뉴스 필터링 + 지표 데이터)"""
+    """일간 보고서용 데이터 구성 (오직 뉴스 텍스트만 활용)"""
     print(f"🔍 [STEP 2-D] Daily 데이터 수집 및 뉴스 필터링 시작...")
     
-    # (1) 지표 데이터 가져오기 (최근 7일 추세)
-    metric_ctx = get_influx_metric_context(7)
-    
-    # (2) 뉴스 수집 및 중복/날짜 필터링 (제공된 로직 적용)
+    # (1) 뉴스 수집 및 중복/날짜 필터링
     news_count = config_data.get("report_news_count", 100)
     raw_news_list = []
     seen_keys = set()
@@ -155,21 +152,19 @@ def _prepare_daily_report_data(config_data, now_kst):
                 continue
         print(f"📊 [결과] 뉴스 수집 완료: 최종 {len(raw_news_list)}개 (제외: {filter_fail}, 실패: {parse_fail})")
     
+    # DB 지표 없이 뉴스 텍스트만 전달
     news_ctx = f"### [ 금일 주요 뉴스 {len(raw_news_list)}선 ]\n" + "\n".join([f"- {t}" for t in raw_news_list])
     
-    final_input = f"{metric_ctx}\n\n{news_ctx}"
-    return final_input, "일간(Daily)"
+    return news_ctx, "일간(Daily)"
+
 
 def _prepare_periodical_report_data(config_data, r_type):
-    """주간/월간 보고서용 데이터 구성 (과거 리포트 요약)"""
+    """주간/월간 보고서용 데이터 구성 (과거 리포트 텍스트 요약 활용)"""
     lookback = 7 if r_type == "weekly" else 30
     label = "주간(Weekly)" if r_type == "weekly" else "월간(Monthly)"
     print(f"🗓️ [STEP 2-{r_type[0].upper()}] {label} 모드: 과거 리포트 요약 구성 중...")
 
-    # (1) 지표 데이터 가져오기
-    metric_ctx = get_influx_metric_context(lookback)
-    
-    # (2) 과거 일간 리포트 파일 읽기
+    # 과거 일간 리포트 파일 읽기 (텍스트에서 지표 흐름을 파악하기 위함)
     daily_dir = os.path.join(REPORT_DIR, "01_daily")
     report_summary = f"### [ 지난 {lookback}일간의 분석 기록 요약 ]\n"
     
@@ -178,13 +173,12 @@ def _prepare_periodical_report_data(config_data, r_type):
         for f_name in files[:lookback]:
             try:
                 with open(os.path.join(daily_dir, f_name), 'r', encoding='utf-8') as f:
-                    # 파일명과 본문 일부 추출
+                    # 파일 내용 추출 (AI가 텍스트 내 수치를 읽을 수 있도록 함)
                     report_summary += f"\n- {f_name}: {f.read()[:400]}...\n"
             except Exception as e:
                 print(f"⚠️ 파일 로드 실패 ({f_name}): {e}")
     
-    final_input = f"{metric_ctx}\n\n{report_summary}"
-    return final_input, label
+    return report_summary, label
 
 def _execute_report_ai_engine(config_data, r_type, report_label, input_content):
     """[공통 AI 엔진] 지침 구성, AI 호출 및 저장"""
@@ -219,142 +213,130 @@ def _execute_report_ai_engine(config_data, r_type, report_label, input_content):
 
 def _execute_report_ai_engine(config_data, r_type, report_label, input_content):
     """
-    [AI 분석 실행 엔진] 지침 구성, 모델 호출, 결과 저장 프로세스를 통합 관리합니다.
+    [지표 추출 특화형] 뉴스 텍스트에서 직접 경제지표를 식별하고 분석합니다.
     """
     now_kst = get_now_kst()
     now_str = now_kst.strftime("%Y-%m-%d %H:%M")
-    
-    # 🎯 STEP 1: 과거 맥락 및 설정 로드
     historical_context = load_historical_contexts()
+    
     a_cfg = config_data.get("analyst_model", {})
     base_url = a_cfg.get("url", "").rstrip('/')
     model_name = a_cfg.get("name")
     
-    print(f"🤖 [STEP 3] AI 모델 호출 시도: {model_name} (유형: {report_label})")
+    print(f"🤖 [STEP 3] 지표 추출형 AI 모델 호출: {model_name} ({report_label})")
 
-    # 🎯 STEP 2: 리포트 타입에 따른 맞춤형 페르소나(Base Prompt) 설정
+    # 🎯 STEP 1: 리포트 타입별 분석 심도 및 변수 정의 (에러 해결)
     if r_type == "daily":
-        # 일간 보고서는 설정파일의 기본 프롬프트 사용
-        base_prompt = config_data.get("council_prompt", "당신은 전문 금융 분석가입니다.")
-    elif r_type in ["weekly", "monthly"]:
-        # 주간/월간은 전략 자산 배분가 관점의 거시적 지침 부여
-        base_prompt = (
-            f"당신은 '전략 자산 배분가'입니다. 제공된 {r_type} 지표 추세와 과거 분석 기록들을 바탕으로 "
-            "단기적 소음(Noise)을 제거하고 거시적인 흐름(Trend)을 요약하세요. "
-            "향후 대응 전략과 포트폴리오 조정 방향에 집중하여 보고서를 작성하세요."
+        base_prompt = config_data.get("council_prompt", "당신은 전략 자산 배분가입니다.")
+        specific_guideline = (
+            "1. 수치 파싱: 뉴스 제목/본문에 언급된 금리, 환율, 지수, 수급 수치를 정확히 찾아내어 데이터화하라.\n"
+            "2. 수치 우선: 뉴스 기사의 주관적 수식어보다 언급된 '전일 대비 등락폭' 수치를 최우선 팩트로 삼는다.\n"
+            "3. 지표 등급: 수집된 수치가 시장에 미치는 영향력을 상/중/하로 분류하라."
         )
+        structure_type = "일간 시황 및 뉴스 지표 분석" # ✅ 변수 정의 확인
     else:
-        base_prompt = config_data.get("council_prompt", "당신은 전문 금융 분석가입니다.")
+        # 주간(Weekly) 및 월간(Monthly) 전용
+        base_prompt = f"당신은 '거시경제 시계열 전략가'입니다. 지난 {r_type}간의 기록에서 지표의 궤적을 분석하세요."
+        specific_guideline = (
+            f"1. 지표 추세 분석: 지난 {r_type}간 뉴스 데이터에서 반복 언급된 주요 지표의 변화 궤적을 재구성하라.\n"
+            "2. 적중률 검토: 과거 리포트(historical_context)에 언급된 전망 수치와 현재 실제 수치를 대조하라.\n"
+            "3. 전략 제언: 수집된 지표 흐름을 바탕으로 자산 배분 비중을 구체적으로 조절하라."
+        )
+        structure_type = f"{r_type.capitalize()} 전략 자산 배분 리포트" # ✅ 변수 정의 확인
 
-    # 🎯 STEP 3: 분석 가이드라인 및 출력 구조 정의
+    # 🎯 STEP 2: 분석 지침 및 구조 통합
     analysis_guideline = (
-        "### [ 자료 분석 지침 ]\n"                        
-        "1. 시장 상태 인지: 현재가 주말이면 가장 최근 거래일(금요일) 종가를 현재가로 간주한다.\n"
-        "2. 수치 절대 우선: 뉴스 제목의 톤보다 '원천 수급 지표'의 등락 수치(+0.55% 등)를 최우선 팩트로 삼는다.\n"
-        "3. 추세와 반등 구분: 며칠간 하락했더라도 마지막 지표가 상승이면 '단기 반등 성공'으로 해석하라.\n"
-        "4. 연속성 원칙: '과거 분석 기록'에서 제시했던 주요 전망과 오늘 '원천 수급 지표'를 비교하여 예측 적중 여부를 반드시 언급하라.\n"
-        "5. 전략적 수정: 지표 변화에 따라 포트폴리오 비중이나 투자 행동 지침을 유연하게 업데이트하라.\n"
-        "6. 뉴스정리: 뉴스가 거시경제나 유동성에 중요한지 판독하여 가중치를 둔다.\n"
+        f"### [ {report_label} 지표 분석 지침 ]\n"
+        f"{specific_guideline}\n"
+        "4. 시장 상태: 주말인 경우 가장 최근 거래일(금요일) 데이터를 현재가로 간주한다.\n"
+        "5. 전략적 수정: 수치 변화에 따라 투자 행동 지침을 유연하게 업데이트하라."
     )
 
     structure_instruction = (
-        "### [ 보고서 작성 형식 ]\n"
-        "아래 구조를 반드시 엄수하여 작성하라:\n"
-        "1. 시황 브리핑 / 2. 주요 뉴스 및 오피니언 / 3. 거시경제 분석 / 4. 자산별 분석 / 5. 산업별 분석 / "
-        "6. 주력/미래 산업 전망 / 7. 리스크 분석 / 8. 포트폴리오 및 전략(비중 % 포함) / 8. 뉴스에서 수집한 경제지표들(다음 보고서를 위한)\n"
+        f"### [ 보고서 작성 형식: {structure_type} ]\n" # ✅ 이제 에러가 발생하지 않습니다.
+        "1. 시황 종합 브리핑 / 2. 뉴스에서 추출한 핵심 지표 리스트 / 3. 지표별 추세 분석 / "
+        "4. 거시경제 판단 / 5. 산업/테마 영향 / 6. 리스크 관리 / 7. 자산 배분 전략(%) / "
+        "8. 차기 분석용 지표 메모"
     )
 
-    # 🎯 STEP 4: 최종 프롬프트 통합
+    # 🎯 STEP 3: 최종 프롬프트 통합
     final_prompt = (
         f"현재 임무: {report_label} 투자 전략 보고서 작성\n\n"
         f"당신은 {base_prompt}\n\n"
         f"{analysis_guideline}\n"
         f"{structure_instruction}\n"
-        f"위 '원천 수급 지표'의 수치를 바탕으로 뉴스를 해석하고 보고서를 작성하라."
+        f"위 뉴스 텍스트 속의 모든 수치를 정밀하게 추출하여 분석하라."
     )
 
-    # 🎯 STEP 5: API 인증 정보 로드 (config 객체 참조)
+    # 🎯 STEP 4: API 인증 정보 로드
     oa_key = config.get("openai_api_key", "")
     gm_key = config.get("gemini_api_key", "")
 
-    # 🎯 STEP 6: 모델 유형별 페이로드 구성 및 호출
+    # 🎯 STEP 5: 모델 유형별 페이로드 구성 및 호출
     if "googleapis.com" in base_url or "gemini" in model_name.lower():
-        # Gemini API 호출 방식
         url = f"{base_url}/v1beta/models/{model_name}:generateContent?key={gm_key}"
         headers = {"Content-Type": "application/json"}
-        payload = {
-            "contents": [{
-                "parts": [{"text": f"지침: {final_prompt}\n\n과거맥락: {historical_context}\n데이터:\n{input_content}"}]
-            }]
-        }
+        payload = {"contents": [{"parts": [{"text": f"지침: {final_prompt}\n\n과거맥락: {historical_context}\n데이터:\n{input_content}"}]}]}
     else:
-        # OpenAI 스타일 API 호출 방식 (GPT 및 호환 모델)
         url = f"{base_url}/chat/completions"
         headers = {"Content-Type": "application/json"}
-        if oa_key and ("gpt" in model_name.lower() or "openai" in base_url.lower()):
-            headers["Authorization"] = f"Bearer {oa_key}"
-        
+        if oa_key: headers["Authorization"] = f"Bearer {oa_key}"
         payload = {
             "model": model_name,
             "messages": [
                 {"role": "system", "content": f"기준시각: {now_str}\n{final_prompt}\n{historical_context}"},
                 {"role": "user", "content": input_content}
             ],
-            "temperature": a_cfg.get("temperature", 0.3)
+            "temperature": 0.2 # 지표 수치 파싱을 위해 낮은 온도 유지
         }
 
-    # 🎯 STEP 7: 요청 실행 및 결과 처리
+    # 🎯 STEP 6: 실행 및 결과 처리
     try:
         start_time = time.time()
         resp = requests.post(url, json=payload, headers=headers, timeout=300)
         resp.raise_for_status()
         result = resp.json()
-        duration = time.time() - start_time
         
-        # 응답 구조 파싱
         if "candidates" in result:
             report_content = result['candidates'][0]['content']['parts'][0]['text']
         else:
             report_content = result['choices'][0]['message']['content']
         
-        # 결과 파일 저장
         save_path = save_report_to_file(report_content, r_type)
-        print(f"✨ [STEP 4] {report_label} 응답 수신 성공! (소요시간: {duration:.1f}초)")
-        print(f"💾 [STEP 5] 보고서 저장 완료: {save_path}")
+        print(f"✨ [STEP 4] {report_label} 생성 성공! (소요시간: {time.time()-start_time:.1f}초)")
         return True
-
     except Exception as e:
-        print(f"🚨 [에러] AI 엔진 실행 중 오류 발생 ({r_type}): {e}")
+        print(f"🚨 [에러] AI 엔진 실행 중 오류: {e}")
         return False
 
 
-if __name__ == "__main__":
-    last_news_time = 0
-    last_auto_report_date = ""
-    last_weekly_report_date = "" 
-    last_monthly_report_date = ""
+# --- [ 3. 메인 루프 (수동 작업에 방해받지 않는 스케줄러) ] ---
 
-# 시스템 시작 로그 (초기 설정 로드)
+if __name__ == "__main__":
+    # 💡 자동화(Auto) 전용 상태 관리 변수 (수동 실행 시 이 변수들을 건드리지 않으면 자동 실행됨)
+    auto_daily_done_date = ""
+    auto_weekly_done_week = ""
+    auto_monthly_done_month = ""
+    
+    last_news_time = 0
+
     try:
         init_config = load_data()
-        report_time = init_config.get('report_gen_time', '08:00')
-        print(f"🚀 [AI Analyst] 시스템 가동 - 기준 시각: {report_time} (KST)")
-        print(f"📂 저장 경로: {BASE_PATH} | 뉴스 대기열: {PENDING_PATH}")
+        print(f"🚀 [AI Analyst] 시스템 가동 - 기준 시각: {init_config.get('report_gen_time', '08:00')} (KST)")
     except Exception as e:
         print(f"❌ 초기 설정 로드 실패: {e}")
 
     while True:
         try:
-            # 1. 매 루프마다 최신 설정 및 시각 업데이트
             now_kst = get_now_kst()
+            current_ts = time.time() # 🚨 NameError 해결
             current_config = load_data()
-            auto_gen_enabled = current_config.get("report_auto_gen", False)
             
-            # 실행 기준 시각 설정 (문자열 공백 제거)
+            auto_gen_enabled = current_config.get("report_auto_gen", False)
             base_time_str = str(current_config.get("report_gen_time", "08:00")).strip()
             current_time_str = now_kst.strftime("%H:%M")
             
-            # 2. 실행 시각 계산 (주간/월간은 순차 처리를 위해 10~20분 간격 배치)
+            # 예약 시각 계산 (10분/20분 간격)
             base_dt = datetime.strptime(base_time_str, "%H:%M")
             weekly_time_str = (base_dt + timedelta(minutes=10)).strftime("%H:%M")
             monthly_time_str = (base_dt + timedelta(minutes=20)).strftime("%H:%M")
@@ -362,30 +344,30 @@ if __name__ == "__main__":
             # --- [ 🤖 자동 보고서 생성 섹션 ] ---
             if auto_gen_enabled:
                 
-                # ① 일간 보고서 (매일 지정 시각)
+                # ① 일간 자동 보고서
                 if current_time_str == base_time_str:
                     today_str = now_kst.strftime("%Y-%m-%d")
-                    if last_auto_report_date != today_str:
-                        print(f"🤖 [{now_kst.strftime('%H:%M:%S')}] >>> (1/3) 일간 보고서 생성 시퀀스 진입")
-                        if generate_auto_report(current_config, r_type="daily"):
-                            last_auto_report_date = today_str
+                    # 💡 수동 보고서 파일이 있어도, '자동 스케줄러'가 오늘 처음이라면 실행합니다.
+                    if auto_daily_done_date != today_str:
+                        print(f"🤖 [{now_kst.strftime('%H:%M:%S')}] >>> 스케줄러: 자동 일간 보고서 생성 시도")
+                        if generate_auto_report(current_config, "daily"):
+                            auto_daily_done_date = today_str # 자동 실행 성공 시에만 마킹
 
-                # ② 주간 보고서 (일요일 & 지정 시각 + 10분)
+                # ② 주간 자동 보고서 (일요일)
                 elif current_time_str == weekly_time_str and now_kst.weekday() == 6:
                     week_str = now_kst.strftime("%Y-%U")
-                    if last_weekly_report_date != week_str:
-                        print(f"📅 [{now_kst.strftime('%H:%M:%S')}] >>> (2/3) 주간 보고서 생성 시퀀스 진입")
-                        if generate_auto_report(current_config, r_type="weekly"):
-                            last_weekly_report_date = week_str
+                    if auto_weekly_done_week != week_str:
+                        print(f"📅 [{now_kst.strftime('%H:%M:%S')}] >>> 스케줄러: 자동 주간 보고서 생성 시도")
+                        if generate_auto_report(current_config, "weekly"):
+                            auto_weekly_done_week = week_str
 
-                # ③ 월간 보고서 (매월 1일 & 지정 시각 + 20분)
+                # ③ 월간 자동 보고서 (1일)
                 elif current_time_str == monthly_time_str and now_kst.day == 1:
                     month_str = now_kst.strftime("%Y-%m")
-                    if last_monthly_report_date != month_str:
-                        print(f"🏛️ [{now_kst.strftime('%H:%M:%S')}] >>> (3/3) 월간 보고서 생성 시퀀스 진입")
-                        if generate_auto_report(current_config, r_type="monthly"):
-                            last_monthly_report_date = month_str
-
+                    if auto_monthly_done_month != month_str:
+                        print(f"🏛️ [{now_kst.strftime('%H:%M:%S')}] >>> 스케줄러: 자동 월간 보고서 생성 시도")
+                        if generate_auto_report(current_config, "monthly"):
+                            auto_monthly_done_month = month_str
             # --- [ 뉴스 수집 섹션 ] ---
             update_interval_min = current_config.get("update_interval", 10)
             update_interval_sec = update_interval_min * 60
@@ -431,7 +413,6 @@ if __name__ == "__main__":
             print(f"🚨 [{datetime.now().strftime('%H:%M:%S')}] 루프 치명적 에러: {e}")
             
         time.sleep(60)
-
 
 
 
