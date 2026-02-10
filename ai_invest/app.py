@@ -626,18 +626,21 @@ elif st.session_state.active_menu == "AI":
                 st.session_state.report_chat_history = []
                 
                 with st.spinner(f"AI 애널리스트가 {r_days}일치 데이터를 통합 분석 중..."):
-                    # [A] 과거 맥락 로드
+                    # [A] 과거 맥락 및 시장 지표 로드 (추가됨)
                     historical_context = load_historical_contexts()
-                    extended_days = r_days + 2
+                    
+                    # 🎯 신규: KRX 실시간 지표 수집 (common.py 함수 활용)
+                    market_indicators = get_krx_market_indicators()
+                    top_investors = get_krx_top_investors()
+                    sector_indices = get_krx_sector_indices()
 
-# [C] 뉴스 데이터 로드 (r_days 적용)
+                    # [C] 뉴스 데이터 로드 (기존 유지)
                     raw_news = load_pending_files("일주일")
                     if not raw_news:
-                        st.error(f"📍 파일 {len(os.listdir(PENDING_PATH))}개 중 유효한 형식이 없습니다.")
+                        st.error(f"📍 유효한 뉴스 데이터가 없습니다.")
                         st.stop()
                     
                     now = datetime.now()
-                    # 주말(토, 일)이나 월요일 아침에는 금요일(3일 전) 데이터까지 포함
                     lookback_days = 3 if now.weekday() in [5, 6, 0] else 2           
                     news_target_dt = now - timedelta(days=lookback_days)
                     
@@ -645,56 +648,38 @@ elif st.session_state.active_menu == "AI":
                     recent_news.sort(key=lambda x: x['pub_dt'], reverse=True)                    
                    
                     news_limit = data.get("report_news_count", 100)
-                    news_items = [f"[{n['pub_dt'].strftime('%m/%d %H:%M')}] {n['title']}" for n in recent_news]
+                    news_items = []
                     
                     for n in recent_news[:news_limit]:
-                        # HTML 태그 제거 및 가독성 최적화
-                        title = n['title']
                         summary = clean_html(n.get('summary', ''))[:150]
-                        time_str = n['pub_dt'].strftime('%Y-%m-%d %H:%M:%S')
-    
-                        news_items.append(f"[{time_str}] {title}\n   - 요약: {summary}")
+                        time_str = n['pub_dt'].strftime('%m/%d %H:%M')
+                        news_items.append(f"[{time_str}] {n['title']}\n   - 요약: {summary}")
                     
-                    news_context = f"### [ 최근 주요 뉴스 데이터 ]\n" + "\n".join(news_items)
+                    # 🎯 데이터 통합: 뉴스 상단에 시장 지표 배치
+                    news_context = (
+                        f"{market_indicators}\n"
+                        f"{top_investors}\n"
+                        f"{sector_indices}\n\n"
+                        f"### [ 최근 주요 뉴스 데이터 ]\n" + "\n".join(news_items)
+                    )
 
-                    # [D] AI 보고서 생성 및 저장
-                    council_instruction = data.get("council_prompt", "당신은 전문 금융 애널리스트입니다.")
+                    # [D] AI 보고서 생성 지침 (기존 유지하되 주의사항 강화)
+                    council_instruction = data.get("council_prompt", "전문 금융 애널리스트")
                     
-                    # 분석 지침 강화: 숫자의 우선순위를 명확히 함
-                    analysis_guideline = (
-                        "### [ 자료 분석 지침 ]\n" 
-                        "1. 시장 상태 인지: 현재가 주말이면 가장 최근 거래일(금요일) 종가를 현재가로 간주한다.\n"
-                        "2. 수치 절대 우선: 뉴스 제목의 톤보다 뉴스에 나온 등락 수치(+0.55% 등)를 최우선 팩트로 삼는다.\n"
-                        "3. 추세와 반등 구분: 며칠간 하락했더라도 마지막 지표가 상승이면 '단기 반등 성공'으로 해석하라.\n"
-                        "4. 연속성 원칙: '과거 분석 기록'에서 제시했던 주요 전망과 오늘 '원천 수급 지표'를 비교하여, 예측이 적중했는지 혹은 상황이 변했는지 반드시 언급하라.\n"
-                        "5. 전략적 수정: 지표 변화에 따라 포트폴리오 비중이나 투자 행동 지침을 유연하게 업데이트하라.\n"
-                    )
-                    structure_instruction = (
-                        "### [ 보고서 작성 형식 ]\n"
-                        "각 항목은 아래의 구조를 반드시 엄수하여 작성하라:\n"
-                        "1. 시황 브리핑: 현재 시장의 핵심 테마를 한 줄 요약 후 전체적인 분위기 기술\n"
-                        "2. 주요 뉴스 및 오피니언: 제공된 뉴스 중 시장 영향력이 큰 발언이나 사건 인용\n"
-                        "3. 거시경제 분석: 환율, 금리, 수급 지표를 바탕으로 한 매크로 환경 진단\n"
-                        "4. 자산별 분석: 주식(국내/외), 채권, 가상자산, 원자재를 5점 척도로 평가\n"
-                        "5. 산업별 분석: 반도체, 금융, 에너지 등 주요 섹터를 5점 척도로 평가\n"
-                        "6. 주력/미래 산업 전망: 현재 주도주의 지속 가능성과 새롭게 부각되는 미래 먹거리 분석\n"
-                        "7. 리스크 분석: 현재 시장의 최대 뇌관 및 잠재적 위험 요소 2~3가지 지적\n"
-                        "8. 포트폴리오 및 전략: 구체적인 자산 배분 비중(%)과 사령관을 위한 투자 행동 지침 하달\n"
-                        "9. 수치 기록: 다음 보고서에서 참고하게 뉴스에서 수집한 경제지표를 날짜와 함께 기록\n"
-                    )
-                    
-                    # 프롬프트 구성: 지표(Fact)를 마지막에 배치하여 강조
                     full_instruction = (
                         f"당신은 {council_instruction}\n"
                         f"현재 시각: {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                        f"{analysis_guideline}\n\n"
+                        f"### [ 자료 분석 지침 ]\n"
+                        f"1. 상단의 'KRX 시장 지표' 수치를 팩트의 기준으로 삼고, 뉴스를 이에 대조하여 분석하라.\n" # 지침 추가
+                        f"2. 수치 절대 우선: 뉴스 제목보다 구체적인 등락 수치와 수급 억 단위 데이터를 신뢰하라.\n"
+                        f"3. 전략적 수정: 수급 주체(외인/기관)의 매수 상위 종목을 바탕으로 주도 섹터를 판별하라.\n\n"
                         f"--- [ 1. 과거 분석 기록 ] ---\n{historical_context}\n\n"
-                        f"--- [ 2. 분석 대상 뉴스 데이터 ] ---\n{news_context}\n\n"
+                        f"--- [ 2. 분석 대상 시장 데이터 및 뉴스 ] ---\n{news_context}\n\n"
                         f"{structure_instruction}\n"
-                        f"**주의: 반드시 위 뉴스 데이터에 명시된 수치와 사건을 바탕으로 보고서를 작성하라.**"
+                        f"**주의: 데이터에 명시된 KRX 수치와 뉴스 사건을 반드시 연계하여 분석 보고서를 작성하라.**"
                     )
                     
-                    # 실제 리포트 생성 (뉴스 본문은 content로 전달)
+                    # 리포트 생성 호출
                     report = get_ai_summary(
                         title=f"{date.today()} {r_type.upper()} 보고서", 
                         content=news_context, 
@@ -785,6 +770,7 @@ elif st.session_state.active_menu == "AI":
             data["council_prompt"] = new_instr
             save_data(data)
             st.success("저장 완료")
+
 
 
 
