@@ -85,91 +85,32 @@ def cleanup_old_files(retention_days):
         print(f"🧹 {deleted_count}개의 뉴스 파일을 정리하고 중복 필터를 초기화했습니다.")
 
 
-def _execute_report_ai_engine(config_data, r_type, report_label, input_content):
+def generate_auto_report(config_data, r_type="daily"):
     """
-    [공통 AI 엔진] 지침 구성, URL 기반 모델 판별, AI 호출 및 저장
+    [통합 보고서 엔진] - 유형별 데이터 준비와 AI 엔진을 분리하여 실행
     """
     now_kst = get_now_kst()
-    now_str = now_kst.strftime("%Y-%m-%d %H:%M")
-    historical_context = load_historical_contexts()
-    
-    a_cfg = config_data.get("analyst_model", {})
-    base_url = a_cfg.get("url", "").rstrip('/')
-    model_name = a_cfg.get("name")
-    
-    # 🎯 STEP 1: 클라우드(Google 직접 호출) 여부 판별
-    # 주소가 구글 API 주소인 경우에만 Gemini 전용 규격을 사용합니다.
-    is_direct_google = "generativelanguage.googleapis.com" in base_url
-    
-    # 🎯 STEP 2: API 키 선택 로직
-    if is_direct_google:
-        api_key = config.get("gemini_api_key", "")
+    now_str = now_kst.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"\n[ {now_str} ] 🏛️ {r_type.upper()} 보고서 생성 프로세스 시작...")
+
+    # 1. 보고서 유형별 데이터 준비
+    if r_type == "daily":
+        input_content, report_label = _prepare_daily_report_data(config_data, now_kst)
     else:
-        # 로컬/OpenAI 서버는 설정된 개별 키 또는 OpenAI 전역 키 사용
-        api_key = a_cfg.get("key") if a_cfg.get("key") else config.get("openai_api_key", "")
+        input_content, report_label = _prepare_periodical_report_data(config_data, r_type)
 
-    print(f"🤖 [STEP 3] AI 엔진 호출: {model_name} ({'Cloud' if is_direct_google else 'Local/OpenAI'})")
-
-    # (분석 지침 및 프롬프트 구성 로직 - 기존 내용 유지)
-    # ... [생략: base_prompt, analysis_guideline, structure_instruction 구성] ...
-
-    # 🎯 STEP 4: 모델 유형별 페이로드 구성 및 호출
-    if is_direct_google:
-        # 🌐 [Case A] 구글 서버 직접 호출 (Gemini API 규격)
-        url = f"{base_url}/v1beta/models/{model_name}:generateContent?key={api_key}"
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "contents": [{
-                "parts": [{"text": f"지침: {final_prompt}\n\n과거맥락: {historical_context}\n데이터:\n{input_content}"}]
-            }],
-            "generationConfig": {"temperature": a_cfg.get("temperature", 0.3)}
-        }
-    else:
-        # 🏠 [Case B] 로컬 서버(Ollama/Open WebUI) 또는 OpenAI 방식
-        url = f"{base_url}/chat/completions"
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-            
-        payload = {
-            "model": model_name,
-            "messages": [
-                {"role": "system", "content": f"기준시각: {now_str}\n{final_prompt}\n{historical_context}"},
-                {"role": "user", "content": input_content}
-            ],
-            "temperature": a_cfg.get("temperature", 0.3)
-        }
-
-    # 🎯 STEP 5: 실행 및 결과 저장
-    try:
-        start_time = time.time()
-        resp = requests.post(url, json=payload, headers=headers, timeout=300)
-        resp.raise_for_status()
-        result = resp.json()
-        
-        # 응답 구조 판별하여 텍스트 추출
-        if is_direct_google:
-            report_content = result['candidates'][0]['content']['parts'][0]['text']
-        else:
-            report_content = result['choices'][0]['message']['content']
-        
-        save_path = save_report_to_file(report_content, r_type)
-        print(f"✨ [STEP 4] {report_label} 생성 성공! (소요시간: {time.time()-start_time:.1f}초)")
-        return True
-    except Exception as e:
-        print(f"🚨 [에러] AI 엔진 실행 중 오류: {e}")
+    if not input_content:
+        print(f"⚠️ [경고] {r_type.upper()} 리포트 생성을 위한 데이터가 부족하여 중단합니다.")
         return False
 
+    # 2. AI 엔진 호출 (분석 및 저장)
+    return _execute_report_ai_engine(config_data, r_type, report_label, input_content)
+
 def _prepare_daily_report_data(config_data, now_kst):
-    """일간 보고서용 데이터 구성 (KRX 시장 지표 + 뉴스 텍스트 통합)"""
-    print(f"🔍 [STEP 2-D] Daily 데이터 수집 (KRX 지표 & 뉴스 필터링) 시작...")
+    """일간 보고서용 데이터 구성 (오직 뉴스 텍스트만 활용)"""
+    print(f"🔍 [STEP 2-D] Daily 데이터 수집 및 뉴스 필터링 시작...")
     
-    # 🎯 1. KRX 시장 지표 데이터 수집 (common.py의 함수 활용)
-    market_summary = get_krx_market_indicators()    # 지수, 거래량, 거래대금, 수급
-    top_purchases = get_krx_top_investors()      # 외인/기관 순매수 상위 10개
-    industry_indices = get_krx_sector_indices()    # 주요 산업별 지수 현황
-    
-    # 🎯 2. 뉴스 수집 및 중복/날짜 필터링
+    # (1) 뉴스 수집 및 중복/날짜 필터링
     news_count = config_data.get("report_news_count", 100)
     raw_news_list = []
     seen_keys = set()
@@ -188,6 +129,7 @@ def _prepare_daily_report_data(config_data, now_kst):
                     
                     if not title: continue
                     
+                    # 날짜 체크
                     try:
                         f_dt = datetime.strptime(pub_dt_str, '%Y-%m-%d %H:%M:%S').date()
                     except:
@@ -197,6 +139,7 @@ def _prepare_daily_report_data(config_data, now_kst):
                         filter_fail += 1
                         continue
 
+                    # 중복 제거 키 생성
                     clean_key = title.replace("[특징주]", "").replace("[속보]", "").replace(" ", "")[:18]
                     if clean_key not in seen_keys:
                         seen_keys.add(clean_key)
@@ -207,20 +150,13 @@ def _prepare_daily_report_data(config_data, now_kst):
             except:
                 parse_fail += 1
                 continue
-        print(f"📊 [결과] 수집 완료: 뉴스 {len(raw_news_list)}개 | 제외 {filter_fail} | 실패 {parse_fail}")
+        print(f"📊 [결과] 뉴스 수집 완료: 최종 {len(raw_news_list)}개 (제외: {filter_fail}, 실패: {parse_fail})")
     
-    # 🎯 3. 최종 데이터 통합 (지표 우선 배치)
-    news_ctx = f"### [ 금일 주요 뉴스 {len(raw_news_list)}선 ]\n" + "\n".join([f"- {t}" for t in raw_news_list])
+    # DB 지표 없이 뉴스 텍스트만 전달
+    m_summary = get_market_summary()
+    news_ctx = f"{m_summary}### [ 금일 주요 뉴스 {len(raw_news_list)}선 ]\n" + "\n".join([f"- {t}" for t in raw_news_list])
     
-    # 실제 수치 데이터와 뉴스 텍스트를 결합하여 AI에게 전달
-    combined_content = (
-        f"{market_summary}\n"
-        f"{top_purchases}\n"
-        f"{industry_indices}\n\n"
-        f"{news_ctx}"
-    )
-    
-    return combined_content, "일간(Daily)"
+    return news_ctx, "일간(Daily)"
 
 
 def _prepare_periodical_report_data(config_data, r_type):
@@ -478,20 +414,3 @@ if __name__ == "__main__":
             print(f"🚨 [{datetime.now().strftime('%H:%M:%S')}] 루프 치명적 에러: {e}")
             
         time.sleep(60)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
