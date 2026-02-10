@@ -111,9 +111,9 @@ def _prepare_daily_report_data(config_data, now_kst):
     print(f"🔍 [STEP 2-D] Daily 데이터 수집 (KRX 지표 & 뉴스 필터링) 시작...")
     
     # 🎯 1. KRX 시장 지표 데이터 수집 (common.py의 함수 활용)
-    market_summary = get_krx_market_summary()    # 지수, 거래량, 거래대금, 수급
-    top_purchases = get_top_net_purchases()      # 외인/기관 순매수 상위 10개
-    industry_indices = get_industry_indices()    # 주요 산업별 지수 현황
+    market_summary = get_krx_market_indicators()    # 지수, 거래량, 거래대금, 수급
+    top_purchases = get_krx_top_investors()      # 외인/기관 순매수 상위 10개
+    industry_indices = get_krx_sector_indices()    # 주요 산업별 지수 현황
     
     # 🎯 2. 뉴스 수집 및 중복/날짜 필터링
     news_count = config_data.get("report_news_count", 100)
@@ -424,6 +424,7 @@ if __name__ == "__main__":
             print(f"🚨 [{datetime.now().strftime('%H:%M:%S')}] 루프 치명적 에러: {e}")
             
         time.sleep(60)
+
 
 
 
