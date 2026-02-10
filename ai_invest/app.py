@@ -658,9 +658,9 @@ elif st.session_state.active_menu == "AI":
                     
                     # 🎯 데이터 통합: 뉴스 상단에 시장 지표 배치
                     news_context = (
-                        f"{market_indicators}\n"
-                        f"{top_investors}\n"
-                        f"{sector_indices}\n\n"
+                        f"시장지표{market_indicators}\n"
+                        f"투자자별 상위 순매수 순위{top_investors}\n"
+                        f"산업별 업종지수{sector_indices}\n\n"
                         f"### [ 최근 주요 뉴스 데이터 ]\n" + "\n".join(news_items)
                     )
 
@@ -788,6 +788,7 @@ elif st.session_state.active_menu == "AI":
             data["council_prompt"] = new_instr
             save_data(data)
             st.success("저장 완료")
+
 
 
 
