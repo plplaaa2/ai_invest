@@ -202,8 +202,6 @@ def load_data():
 # 공통 데이터 객체 (모든 모듈에서 공유)
 data = load_data()
 
-from pykrx import stock
-
 def get_krx_market_indicators():
     """코스피/코스닥 지수 및 수급현황 요약 (로그 강화)"""
     try:
@@ -223,7 +221,7 @@ def get_krx_market_indicators():
         foreign_bill = df_inv['외국인'].sum() / 100_000_000
         inst_bill = df_inv['기관합계'].sum() / 100_000_000
         summary += f"- 투자자 수급: 외국인 {foreign_bill:,.0f}억, 기관 {inst_bill:,.0f}억 (순매수 기준)\n"
-        print(f"   💰 수급 데이터 합계: 외인({foreign_bill:,.0f}억), 기관({inst_bill:,.0f}억)")
+        print(f"   💰 수급 데이터 합계: 외인({foreign_bill:,.0f}억), 기관({inst_bill:,.0f}억)", flush=True)
         
         return summary
     except Exception as e:
@@ -248,8 +246,8 @@ def get_krx_top_investors():
         f_top = get_top_list(df, '외국인')
         i_top = get_top_list(df, '기관합계')
         
-        print(f"🔝 [순매수 Top 10] 외인: {f_top[:50]}...") # 로그가 너무 길지 않게 일부만 출력
-        print(f"🔝 [순매수 Top 10] 기관: {i_top[:50]}...")
+        print(f"🔝 [순매수 Top 10] 외인: {f_top[:50]}...", flush=True)# 로그가 너무 길지 않게 일부만 출력
+        print(f"🔝 [순매수 Top 10] 기관: {i_top[:50]}...", flush=True)
         
         report = "### [ 수급 상위 종목 (Top 10) ]\n"
         report += f"- 외국인 매수: {f_top}\n"
@@ -275,7 +273,7 @@ def get_krx_sector_indices():
                 if not df.empty:
                     val = df.iloc[0]['종가']
                     report += f"- {name}: {val:,.2f}\n"
-                    print(f"   ✅ 섹터 확인: {name} ({val:,.2f})")
+                    print(f"   ✅ 섹터 확인: {name} ({val:,.2f})", flush=True)
                     count += 1
             if count >= 8: break
         return report
