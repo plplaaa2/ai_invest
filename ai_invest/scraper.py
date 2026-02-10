@@ -85,32 +85,16 @@ def cleanup_old_files(retention_days):
         print(f"🧹 {deleted_count}개의 뉴스 파일을 정리하고 중복 필터를 초기화했습니다.")
 
 
-def generate_auto_report(config_data, r_type="daily"):
-    """
-    [통합 보고서 엔진] - 유형별 데이터 준비와 AI 엔진을 분리하여 실행
-    """
-    now_kst = get_now_kst()
-    now_str = now_kst.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n[ {now_str} ] 🏛️ {r_type.upper()} 보고서 생성 프로세스 시작...")
-
-    # 1. 보고서 유형별 데이터 준비
-    if r_type == "daily":
-        input_content, report_label = _prepare_daily_report_data(config_data, now_kst)
-    else:
-        input_content, report_label = _prepare_periodical_report_data(config_data, r_type)
-
-    if not input_content:
-        print(f"⚠️ [경고] {r_type.upper()} 리포트 생성을 위한 데이터가 부족하여 중단합니다.")
-        return False
-
-    # 2. AI 엔진 호출 (분석 및 저장)
-    return _execute_report_ai_engine(config_data, r_type, report_label, input_content)
-
 def _prepare_daily_report_data(config_data, now_kst):
-    """일간 보고서용 데이터 구성 (오직 뉴스 텍스트만 활용)"""
-    print(f"🔍 [STEP 2-D] Daily 데이터 수집 및 뉴스 필터링 시작...")
+    """일간 보고서용 데이터 구성 (KRX 시장 지표 + 뉴스 텍스트 통합)"""
+    print(f"🔍 [STEP 2-D] Daily 데이터 수집 (KRX 지표 & 뉴스 필터링) 시작...")
     
-    # (1) 뉴스 수집 및 중복/날짜 필터링
+    # 🎯 1. KRX 시장 지표 데이터 수집 (common.py의 함수 활용)
+    market_summary = get_krx_market_indicators()    # 지수, 거래량, 거래대금, 수급
+    top_purchases = get_krx_top_investors()      # 외인/기관 순매수 상위 10개
+    industry_indices = get_krx_sector_indices()    # 주요 산업별 지수 현황
+    
+    # 🎯 2. 뉴스 수집 및 중복/날짜 필터링
     news_count = config_data.get("report_news_count", 100)
     raw_news_list = []
     seen_keys = set()
@@ -129,7 +113,6 @@ def _prepare_daily_report_data(config_data, now_kst):
                     
                     if not title: continue
                     
-                    # 날짜 체크
                     try:
                         f_dt = datetime.strptime(pub_dt_str, '%Y-%m-%d %H:%M:%S').date()
                     except:
@@ -139,7 +122,6 @@ def _prepare_daily_report_data(config_data, now_kst):
                         filter_fail += 1
                         continue
 
-                    # 중복 제거 키 생성
                     clean_key = title.replace("[특징주]", "").replace("[속보]", "").replace(" ", "")[:18]
                     if clean_key not in seen_keys:
                         seen_keys.add(clean_key)
@@ -150,13 +132,20 @@ def _prepare_daily_report_data(config_data, now_kst):
             except:
                 parse_fail += 1
                 continue
-        print(f"📊 [결과] 뉴스 수집 완료: 최종 {len(raw_news_list)}개 (제외: {filter_fail}, 실패: {parse_fail})")
+        print(f"📊 [결과] 수집 완료: 뉴스 {len(raw_news_list)}개 | 제외 {filter_fail} | 실패 {parse_fail}")
     
-    # DB 지표 없이 뉴스 텍스트만 전달
-    m_summary = get_market_summary()
-    news_ctx = f"{m_summary}### [ 금일 주요 뉴스 {len(raw_news_list)}선 ]\n" + "\n".join([f"- {t}" for t in raw_news_list])
+    # 🎯 3. 최종 데이터 통합 (지표 우선 배치)
+    news_ctx = f"### [ 금일 주요 뉴스 {len(raw_news_list)}선 ]\n" + "\n".join([f"- {t}" for t in raw_news_list])
     
-    return news_ctx, "일간(Daily)"
+    # 실제 수치 데이터와 뉴스 텍스트를 결합하여 AI에게 전달
+    combined_content = (
+        f"{market_summary}\n"
+        f"{top_purchases}\n"
+        f"{industry_indices}\n\n"
+        f"{news_ctx}"
+    )
+    
+    return combined_content, "일간(Daily)"
 
 
 def _prepare_periodical_report_data(config_data, r_type):
@@ -182,37 +171,6 @@ def _prepare_periodical_report_data(config_data, r_type):
     return report_summary, label
 
 def _execute_report_ai_engine(config_data, r_type, report_label, input_content):
-    """[공통 AI 엔진] 지침 구성, AI 호출 및 저장"""
-    now_kst = get_now_kst()
-    now_str = now_kst.strftime("%Y-%m-%d %H:%M:%S")
-    historical_context = load_historical_contexts() # STEP 1 맥락 로드
-
-    # 1. 프롬프트 설정 (참조하신 구조 적용)
-    if r_type == "daily":
-        base_prompt = config_data.get("council_prompt", "당신은 전략 자산 배분가입니다.")
-    else:
-        base_prompt = (
-            f"당신은 '전략 자산 배분가'입니다. 제공된 뉴스의 지표 추세와 과거 분석 기록들을 바탕으로 "
-            "단기적 소음(Noise)을 제거하고 거시적인 흐름(Trend)을 요약하세요."
-        )
-
-    analysis_guideline = (
-        "### [ 자료 분석 지침 ]\n"
-        "1. 수치 절대 우선: 뉴스 수치를 최우선 팩트로 삼는다.\n"
-        "2. 연속성 원칙: 과거 분석 기록과 현재 지표를 비교하여 전망의 적중 여부를 언급하라.\n"
-        "3. 전략적 수정: 변화에 따라 포트폴리오 비중을 유연하게 업데이트하라.\n"
-    )
-
-    final_prompt = f"현재 임무: {report_label} 투자 전략 보고서 작성\n\n당신은 {base_prompt}\n\n{analysis_guideline}"
-
-    # 2. AI 모델 설정 및 호출 (Gemini/OpenAI 분기 로직)
-    a_cfg = config_data.get("analyst_model", {})
-    model_name = a_cfg.get("name")
-    print(f"🤖 [STEP 3] AI 모델 호출: {model_name}")
-
-
-
-def _execute_report_ai_engine(config_data, r_type, report_label, input_content):
     """
     [지표 추출 특화형] 뉴스 텍스트에서 직접 경제지표를 식별하고 분석합니다.
     """
@@ -230,11 +188,14 @@ def _execute_report_ai_engine(config_data, r_type, report_label, input_content):
     if r_type == "daily":
         base_prompt = config_data.get("council_prompt", "당신은 전략 자산 배분가입니다.")
         specific_guideline = (
-            "1. 수치 파싱: 뉴스 제목/본문에 언급된 금리, 환율, 지수, 수급 수치를 정확히 찾아내어 데이터화하라.\n"
-            "2. 수치 우선: 뉴스 기사의 주관적 수식어보다 언급된 '전일 대비 등락폭' 수치를 최우선 팩트로 삼는다.\n"
-            "3. 지표 등급: 수집된 수치가 시장에 미치는 영향력을 상/중/하로 분류하라."
+            "**[KRX 데이터 분석 방법론]**\n"
+            "1.  **시장 방향성 확인**: `KRX 시장 지표 요약`에서 코스피/코스닥 지수 등락을 보고 시장의 전반적인 방향(상승/하락/보합)을 먼저 정의합니다.\n"
+            "2.  **주도 주체 식별**: `투자자 수급` 데이터에서 외국인과 기관 중 누가 시장을 주도했는지(순매수 규모)를 파악합니다.\n"
+            "3.  **주도 섹터 특정**: `수급 상위 종목` 리스트에서 주도 주체(2번)가 집중적으로 매수한 종목들을 확인하여 '오늘의 주도 섹터'를 특정합니다.\n"
+            "4.  **섹터 강도 교차검증**: `주요 산업별 지수 현황`에서 3번에서 특정한 섹터의 지수가 실제로 상승했는지 교차 검증합니다.\n"
+            "5.  **뉴스 연계 해석**: 위 1~4번 과정으로 도출된 '데이터 기반 결론'에 대한 이유나 배경을 `금일 주요 뉴스`에서 찾아내어 설명을 보강합니다. 뉴스는 데이터 분석을 뒷받침하는 근거로만 활용하세요."
         )
-        structure_type = "일간 시황 및 뉴스 지표 분석" # ✅ 변수 정의 확인
+        structure_type = "일간 시황 및 데이터 기반 전략 분석"
     else:
         # 주간(Weekly) 및 월간(Monthly) 전용
         base_prompt = f"당신은 '거시경제 시계열 전략가'입니다. 지난 {r_type}간의 기록에서 지표의 궤적을 분석하세요."
@@ -261,12 +222,15 @@ def _execute_report_ai_engine(config_data, r_type, report_label, input_content):
     )
 
     # 🎯 STEP 3: 최종 프롬프트 통합
-    final_prompt = (
-        f"현재 임무: {report_label} 투자 전략 보고서 작성\n\n"
-        f"당신은 {base_prompt}\n\n"
-        f"{analysis_guideline}\n"
-        f"{structure_instruction}\n"
-        f"위 뉴스 텍스트 속의 모든 수치를 정밀하게 추출하여 분석하라."
+    system_prompt = (
+        f"현재 임무: {report_label} 투자 전략 보고서 작성\n"
+        f"기준 시각: {now_str}\n\n"
+        f"당신은 {base_prompt}이며, 지금부터 제시된 분석 방법론을 철저히 준수해야 합니다.\n\n"
+        f"{analysis_guideline}\n\n"
+        f"--- [ 과거 분석 기록 (참고용) ] ---\n{historical_context}\n\n"
+        f"--- [ 최종 지시 ] ---\n"
+        f"이제 제공될 데이터(KRX 원천 데이터, 최신 뉴스)를 바탕으로, 위 방법론과 과거 기록을 참고하여 아래 형식에 맞춰 투자 전략 보고서를 작성하세요.\n"
+        f"{structure_instruction}"
     )
 
     # 🎯 STEP 4: API 인증 정보 로드
@@ -277,17 +241,15 @@ def _execute_report_ai_engine(config_data, r_type, report_label, input_content):
     if "googleapis.com" in base_url or "gemini" in model_name.lower():
         url = f"{base_url}/v1beta/models/{model_name}:generateContent?key={gm_key}"
         headers = {"Content-Type": "application/json"}
-        payload = {"contents": [{"parts": [{"text": f"지침: {final_prompt}\n\n과거맥락: {historical_context}\n데이터:\n{input_content}"}]}]}
-    else:
+           # Gemini는 System Prompt를 지원하지 않으므로, 하나의 텍스트로 합쳐서 전달
+        payload = {"contents": [{"parts": [{"text": f"{system_prompt}\n\n--- [ 분석 대상 데이터 ] ---\n{input_content}"}]}]}
         url = f"{base_url}/chat/completions"
         headers = {"Content-Type": "application/json"}
         if oa_key: headers["Authorization"] = f"Bearer {oa_key}"
         payload = {
             "model": model_name,
-            "messages": [
-                {"role": "system", "content": f"기준시각: {now_str}\n{final_prompt}\n{historical_context}"},
-                {"role": "user", "content": input_content}
-            ],
+            # OpenAI 규격은 시스템 프롬프트와 사용자 입력을 분리하여 전달
+            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": input_content}],
             "temperature": 0.2 # 지표 수치 파싱을 위해 낮은 온도 유지
         }
 
@@ -310,6 +272,20 @@ def _execute_report_ai_engine(config_data, r_type, report_label, input_content):
         print(f"🚨 [에러] AI 엔진 실행 중 오류: {e}")
         return False
 
+def generate_auto_report(config_data, r_type):
+    """자동 보고서 생성 오케스트레이터"""
+    now_kst = get_now_kst()
+    
+    if r_type == "daily":
+        input_content, label = _prepare_daily_report_data(config_data, now_kst)
+    else:
+        input_content, label = _prepare_periodical_report_data(config_data, r_type)
+        
+    if not input_content:
+        print(f"⚠️ [Auto] 분석할 데이터가 부족하여 보고서 생성을 건너뜁니다.")
+        return False
+
+    return _execute_report_ai_engine(config_data, r_type, label, input_content)
 
 # --- [ 3. 메인 루프 (수동 작업에 방해받지 않는 스케줄러) ] ---
 
