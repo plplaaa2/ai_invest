@@ -215,30 +215,33 @@ def get_latest_trading_date():
         return get_now_kst().strftime("%Y%m%d")
 
 def get_krx_market_indicators():
-    """코스피/코스닥 지수, 거래정보, 수급현황을 억 원 단위로 요약"""
+    """코스피/코스닥 지수 및 수급현황 요약 (로그 강화)"""
     try:
         target_date = get_latest_trading_date()
+        print(f"🔍 [지표 수집] 대상 날짜: {target_date}")
         summary = f"### [ KRX 시장 지표 요약 ({target_date}) ]\n"
 
-        # 1. 지수 및 거래 데이터 (억 원 단위 환산)
         for m_name, m_code in [("KOSPI", "1001"), ("KOSDAQ", "2001")]:
             df = stock.get_index_ohlcv_by_date(target_date, target_date, m_code)
             if not df.empty:
                 row = df.iloc[0]
-                amount_bill = row['거래대금'] / 100_000_000 # 억 원 단위
+                amount_bill = row['거래대금'] / 100_000_000
                 summary += f"- {m_name}: {row['종가']:,.2f} (거래량: {row['거래량']:,.0f}, 거래대금: {amount_bill:,.0f}억)\n"
+                print(f"   📊 {m_name} 로드 완료: {row['종가']:,.2f}")
 
-        # 2. 투자자별 순매수 합계
         df_inv = stock.get_market_net_purchase_of_equities_by_ticker(target_date, target_date, "ALL")
         foreign_bill = df_inv['외국인'].sum() / 100_000_000
         inst_bill = df_inv['기관합계'].sum() / 100_000_000
         summary += f"- 투자자 수급: 외국인 {foreign_bill:,.0f}억, 기관 {inst_bill:,.0f}억 (순매수 기준)\n"
+        print(f"   💰 수급 데이터 합계: 외인({foreign_bill:,.0f}억), 기관({inst_bill:,.0f}억)")
         
         return summary
-    except: return "⚠️ KRX 지수 요약 로드 실패"
+    except Exception as e:
+        print(f"❌ [에러] 지수 요약 로드 실패: {e}")
+        return "⚠️ KRX 지수 요약 로드 실패"
 
 def get_krx_top_investors():
-    """외국인/기관 순매수 상위 10개 종목 리스트 생성"""
+    """외국인/기관 순매수 상위 10개 종목 (로그 강화)"""
     try:
         target_date = get_latest_trading_date()
         df = stock.get_market_net_purchase_of_equities_by_ticker(target_date, target_date, "ALL")
@@ -252,17 +255,26 @@ def get_krx_top_investors():
                 items.append(f"{name}({val_bill:,.0f}억)")
             return ", ".join(items)
 
+        f_top = get_top_list(df, '외국인')
+        i_top = get_top_list(df, '기관합계')
+        
+        print(f"🔝 [순매수 Top 10] 외인: {f_top[:50]}...") # 로그가 너무 길지 않게 일부만 출력
+        print(f"🔝 [순매수 Top 10] 기관: {i_top[:50]}...")
+        
         report = "### [ 수급 상위 종목 (Top 10) ]\n"
-        report += f"- 외국인 매수: {get_top_list(df, '외국인')}\n"
-        report += f"- 기관 매수: {get_top_list(df, '기관합계')}\n"
+        report += f"- 외국인 매수: {f_top}\n"
+        report += f"- 기관 매수: {i_top}\n"
         return report
-    except: return "⚠️ 수급 종목 로드 실패"
+    except Exception as e:
+        print(f"❌ [에러] 수급 종목 로드 실패: {e}")
+        return "⚠️ 수급 종목 로드 실패"
 
 def get_krx_sector_indices():
-    """반도체, IT 등 주요 산업별 지수 현황 추출"""
+    """주요 산업별 지수 현황 (로그 강화)"""
     try:
         target_date = get_latest_trading_date()
         indices = stock.get_index_ticker_list(target_date, market="KRX")
+        print(f"🏭 [산업 섹터] 전체 {len(indices)}개 지수 중 주요 항목 필터링 중...")
         
         report = "### [ 주요 산업별 지수 현황 ]\n"
         count = 0
@@ -271,8 +283,12 @@ def get_krx_sector_indices():
             if any(kw in name for kw in ['반도체', 'IT', '금융', '에너지', '바이오', '자동차']):
                 df = stock.get_index_ohlcv_by_date(target_date, target_date, ticker)
                 if not df.empty:
-                    report += f"- {name}: {df.iloc[0]['종가']:,.2f}\n"
+                    val = df.iloc[0]['종가']
+                    report += f"- {name}: {val:,.2f}\n"
+                    print(f"   ✅ 섹터 확인: {name} ({val:,.2f})")
                     count += 1
             if count >= 8: break
         return report
-    except: return "⚠️ 산업 지수 로드 실패"
+    except Exception as e:
+        print(f"❌ [에러] 산업 지수 로드 실패: {e}")
+        return "⚠️ 산업 지수 로드 실패"
