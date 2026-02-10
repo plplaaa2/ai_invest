@@ -184,6 +184,12 @@ def _execute_report_ai_engine(config_data, r_type, report_label, input_content):
     
     print(f"🤖 [STEP 3] 지표 추출형 AI 모델 호출: {model_name} ({report_label})")
 
+    # 💡 [로그 추가] AI에게 전달될 최종 데이터 확인
+    print("\n" + "="*50)
+    print("🤖 [AI 입력 데이터 확인] 자동 보고서 생성을 위해 아래 데이터를 AI에 전달합니다.")
+    print(input_content[:1000] + "...") # 너무 길지 않게 일부만 출력
+    print("="*50 + "\n")
+
     # 🎯 STEP 1: 리포트 타입별 분석 심도 및 변수 정의 (에러 해결)
     if r_type == "daily":
         base_prompt = config_data.get("council_prompt", "당신은 전략 자산 배분가입니다.")
@@ -243,6 +249,7 @@ def _execute_report_ai_engine(config_data, r_type, report_label, input_content):
         headers = {"Content-Type": "application/json"}
            # Gemini는 System Prompt를 지원하지 않으므로, 하나의 텍스트로 합쳐서 전달
         payload = {"contents": [{"parts": [{"text": f"{system_prompt}\n\n--- [ 분석 대상 데이터 ] ---\n{input_content}"}]}]}
+    else:
         url = f"{base_url}/chat/completions"
         headers = {"Content-Type": "application/json"}
         if oa_key: headers["Authorization"] = f"Bearer {oa_key}"
