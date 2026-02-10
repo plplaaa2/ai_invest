@@ -161,10 +161,15 @@ def _execute_report_ai_engine(config_data, r_type, report_label, input_content):
         return False
 
 def _prepare_daily_report_data(config_data, now_kst):
-    """일간 보고서용 데이터 구성 (오직 뉴스 텍스트만 활용)"""
-    print(f"🔍 [STEP 2-D] Daily 데이터 수집 및 뉴스 필터링 시작...")
+    """일간 보고서용 데이터 구성 (KRX 시장 지표 + 뉴스 텍스트 통합)"""
+    print(f"🔍 [STEP 2-D] Daily 데이터 수집 (KRX 지표 & 뉴스 필터링) 시작...")
     
-    # (1) 뉴스 수집 및 중복/날짜 필터링
+    # 🎯 1. KRX 시장 지표 데이터 수집 (common.py의 함수 활용)
+    market_summary = get_krx_market_indicators()    # 지수, 거래량, 거래대금, 수급
+    top_purchases = get_krx_top_investors()      # 외인/기관 순매수 상위 10개
+    industry_indices = get_krx_sector_indices()    # 주요 산업별 지수 현황
+    
+    # 🎯 2. 뉴스 수집 및 중복/날짜 필터링
     news_count = config_data.get("report_news_count", 100)
     raw_news_list = []
     seen_keys = set()
@@ -183,7 +188,6 @@ def _prepare_daily_report_data(config_data, now_kst):
                     
                     if not title: continue
                     
-                    # 날짜 체크
                     try:
                         f_dt = datetime.strptime(pub_dt_str, '%Y-%m-%d %H:%M:%S').date()
                     except:
@@ -193,7 +197,6 @@ def _prepare_daily_report_data(config_data, now_kst):
                         filter_fail += 1
                         continue
 
-                    # 중복 제거 키 생성
                     clean_key = title.replace("[특징주]", "").replace("[속보]", "").replace(" ", "")[:18]
                     if clean_key not in seen_keys:
                         seen_keys.add(clean_key)
@@ -204,12 +207,20 @@ def _prepare_daily_report_data(config_data, now_kst):
             except:
                 parse_fail += 1
                 continue
-        print(f"📊 [결과] 뉴스 수집 완료: 최종 {len(raw_news_list)}개 (제외: {filter_fail}, 실패: {parse_fail})")
+        print(f"📊 [결과] 수집 완료: 뉴스 {len(raw_news_list)}개 | 제외 {filter_fail} | 실패 {parse_fail}")
     
-    # DB 지표 없이 뉴스 텍스트만 전달
+    # 🎯 3. 최종 데이터 통합 (지표 우선 배치)
     news_ctx = f"### [ 금일 주요 뉴스 {len(raw_news_list)}선 ]\n" + "\n".join([f"- {t}" for t in raw_news_list])
     
-    return news_ctx, "일간(Daily)"
+    # 실제 수치 데이터와 뉴스 텍스트를 결합하여 AI에게 전달
+    combined_content = (
+        f"{market_summary}\n"
+        f"{top_purchases}\n"
+        f"{industry_indices}\n\n"
+        f"{news_ctx}"
+    )
+    
+    return combined_content, "일간(Daily)"
 
 
 def _prepare_periodical_report_data(config_data, r_type):
@@ -467,6 +478,8 @@ if __name__ == "__main__":
             print(f"🚨 [{datetime.now().strftime('%H:%M:%S')}] 루프 치명적 에러: {e}")
             
         time.sleep(60)
+
+
 
 
 
