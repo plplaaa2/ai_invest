@@ -204,16 +204,6 @@ data = load_data()
 
 from pykrx import stock
 
-def get_latest_trading_date():
-    """가장 최근 영업일을 안전하게 탐색 (기존 함수 영향 없음)"""
-    try:
-        now = get_now_kst()
-        # 최근 10일치 데이터를 긁어 마지막 인덱스(영업일) 추출
-        df = stock.get_index_ohlcv_by_date((now - timedelta(days=10)).strftime("%Y%m%d"), now.strftime("%Y%m%d"), "1001")
-        return df.index[-1].strftime("%Y%m%d")
-    except:
-        return get_now_kst().strftime("%Y%m%d")
-
 def get_krx_market_indicators():
     """코스피/코스닥 지수 및 수급현황 요약 (로그 강화)"""
     try:
