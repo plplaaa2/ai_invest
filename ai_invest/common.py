@@ -8,7 +8,7 @@ import math
 import feedparser
 from datetime import datetime, timedelta, date, timezone
 from bs4 import BeautifulSoup
-from pykrx import stock
+
 
 
 KST = timezone(timedelta(hours=9))
@@ -139,6 +139,34 @@ def load_historical_contexts():
             
     return context_text
     
+def get_market_summary():
+    """Pykrx를 활용해 KOSPI/KOSDAQ 지수를 가져옵니다."""
+    summary = ""
+    try:
+        from pykrx import stock
+        now = get_now_kst()
+        # 최근 5일 조회 (주말/휴일 대비)
+        start_dt = (now - timedelta(days=5)).strftime("%Y%m%d")
+        end_dt = now.strftime("%Y%m%d")
+        
+        # 1001: KOSPI, 2001: KOSDAQ
+        df_k = stock.get_index_ohlcv(start_dt, end_dt, "1001")
+        df_kq = stock.get_index_ohlcv(start_dt, end_dt, "2001")
+        
+        if not df_k.empty and not df_kq.empty:
+            last_k = df_k.iloc[-1]
+            last_kq = df_kq.iloc[-1]
+            date_str = last_k.name.strftime("%Y-%m-%d")
+            
+            summary = (
+                f"### [ 📉 국내 증시 요약 ({date_str}) ]\n"
+                f"- KOSPI: {last_k['종가']:,.2f} ({last_k['등락률']:+.2f}%)\n"
+                f"- KOSDAQ: {last_kq['종가']:,.2f} ({last_kq['등락률']:+.2f}%)\n\n"
+            )
+    except Exception as e:
+        print(f"⚠️ Pykrx 데이터 조회 실패: {e}")
+    return summary
+
 def load_data():
     """서비스 설정(RSS, AI 모델 등)을 로드하고 미존재 시 기본 설정을 생성합니다."""
     default_structure = {
