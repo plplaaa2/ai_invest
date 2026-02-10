@@ -40,19 +40,21 @@ def get_ai_summary(title, content, system_instruction=None, role="filter"):
     user_prompt = system_instruction if system_instruction else cfg.get("prompt", "")
     final_role = f"현재 시각: {now_time}\n분석 지침: {user_prompt}"
 
-    # 🎯 2. 호출 방식 및 API 키 로드 판별
-    # 구글 공식 API 주소인 경우에만 '진짜 제미나이 규격'으로 작동합니다.
-    is_direct_google = "googleapis.com" in base_url
+    # 🎯 2. [수정 포인트] 클라우드(Google 직접 호출) 여부 판별
+    # 모델명에 gemini가 있더라도, URL이 구글 주소일 때만 '진짜 클라우드'로 판정합니다.
+    is_direct_google = "generativelanguage.googleapis.com" in base_url
     
-    # 모델명에 gemini가 들어가는 경우(로컬 경유 포함) gemini_api_key를 우선 시도합니다.
-    if is_direct_google or "gemini" in model_name.lower():
-        api_key = cfg.get("key") if cfg.get("key") else config.get("gemini_api_key", "")
+    # API 키 선택 로직 강화
+    if is_direct_google:
+        # 구글 공식 서비스는 무조건 gemini_api_key 사용
+        api_key = config.get("gemini_api_key", "")
     else:
+        # 그 외(로컬/OpenAI 등)는 설정된 개별 키 -> OpenAI 키 순으로 시도
         api_key = cfg.get("key") if cfg.get("key") else config.get("openai_api_key", "")
 
-    # 🎯 3. 제공자별 URL 및 페이로드 구성
+    # 🎯 3. 호출 방식 분기 (URL 구조 기반)
     if is_direct_google:
-        # 🌐 [Case A] 구글 서버 직접 호출 방식
+        # 🌐 [Case A] 구글 서버 직접 호출 방식 (Gemini API 규격)
         url = f"{base_url}/v1beta/models/{model_name}:generateContent?key={api_key}"
         headers = {"Content-Type": "application/json"}
         payload = {
@@ -62,12 +64,11 @@ def get_ai_summary(title, content, system_instruction=None, role="filter"):
             "generationConfig": {"temperature": cfg.get("temperature", 0.3)}
         }
     else:
-        # 🏠 [Case B] 로컬 서버(Open WebUI 등) 또는 OpenAI 방식
-        # gemini-3-flash-preview:cloud 같은 모델도 이 로직을 타게 됩니다.
+        # 🏠 [Case B] 로컬 서버(Ollama/Open WebUI) 또는 OpenAI 방식 (Chat Completion 규격)
+        # 이제 gemini-3-flash-preview:cloud 모델도 주소가 로컬이면 이 로직을 탑니다.
         url = f"{base_url}/chat/completions"
         headers = {"Content-Type": "application/json"}
         if api_key:
-            # 로컬 서버 인증을 위해 Bearer 헤더를 사용합니다.
             headers["Authorization"] = f"Bearer {api_key}"
             
         payload = {
@@ -626,18 +627,21 @@ elif st.session_state.active_menu == "AI":
                 st.session_state.report_chat_history = []
                 
                 with st.spinner(f"AI 애널리스트가 {r_days}일치 데이터를 통합 분석 중..."):
-                    # [A] 과거 맥락 로드
+                    # [A] 과거 맥락 및 시장 지표 로드 (추가됨)
                     historical_context = load_historical_contexts()
-                    extended_days = r_days + 2
+                    
+                    # 🎯 신규: KRX 실시간 지표 수집 (common.py 함수 활용)
+                    market_indicators = get_krx_market_indicators()
+                    top_investors = get_krx_top_investors()
+                    sector_indices = get_krx_sector_indices()
 
-# [C] 뉴스 데이터 로드 (r_days 적용)
+                    # [C] 뉴스 데이터 로드 (기존 유지)
                     raw_news = load_pending_files("일주일")
                     if not raw_news:
-                        st.error(f"📍 파일 {len(os.listdir(PENDING_PATH))}개 중 유효한 형식이 없습니다.")
+                        st.error(f"📍 유효한 뉴스 데이터가 없습니다.")
                         st.stop()
                     
                     now = datetime.now()
-                    # 주말(토, 일)이나 월요일 아침에는 금요일(3일 전) 데이터까지 포함
                     lookback_days = 3 if now.weekday() in [5, 6, 0] else 2           
                     news_target_dt = now - timedelta(days=lookback_days)
                     
@@ -645,60 +649,57 @@ elif st.session_state.active_menu == "AI":
                     recent_news.sort(key=lambda x: x['pub_dt'], reverse=True)                    
                    
                     news_limit = data.get("report_news_count", 100)
-                    news_items = [f"[{n['pub_dt'].strftime('%m/%d %H:%M')}] {n['title']}" for n in recent_news]
+                    news_items = []
                     
                     for n in recent_news[:news_limit]:
-                        # HTML 태그 제거 및 가독성 최적화
-                        title = n['title']
                         summary = clean_html(n.get('summary', ''))[:150]
-                        time_str = n['pub_dt'].strftime('%Y-%m-%d %H:%M:%S')
-    
-                        news_items.append(f"[{time_str}] {title}\n   - 요약: {summary}")
+                        time_str = n['pub_dt'].strftime('%m/%d %H:%M')
+                        news_items.append(f"[{time_str}] {n['title']}\n   - 요약: {summary}")
                     
-                    m_summary = get_market_summary()
-                    news_context = f"{m_summary}### [ 최근 주요 뉴스 데이터 ]\n" + "\n".join(news_items)
+                    # 🎯 데이터 통합: KRX 지표와 뉴스를 명확히 구분하여 AI의 혼동을 방지
+                    combined_data_for_ai = (
+                        f"--- [ 1. KRX 원천 데이터 (Source of Truth) ] ---\n"
+                        f"{market_indicators}\n"
+                        f"{top_investors}\n"
+                        f"{sector_indices}\n\n"
+                        f"--- [ 2. 참고용 최신 뉴스 ] ---\n" + "\n".join(news_items)
+                    )
 
-                    # [D] AI 보고서 생성 및 저장
-                    council_instruction = data.get("council_prompt", "당신은 전문 금융 애널리스트입니다.")
-                    
-                    # 분석 지침 강화: 숫자의 우선순위를 명확히 함
+                    # [D] AI 보고서 생성 지침 (KRX 데이터 해석 능력 강화)
+                    council_instruction = data.get("council_prompt", "전문 금융 애널리스트")
+                    # 🎯 1. 분석 지침 강화 (기존 유지)
                     analysis_guideline = (
                         "### [ 자료 분석 지침 ]\n" 
-                        "1. 시장 상태 인지: 현재가 주말이면 가장 최근 거래일(금요일) 종가를 현재가로 간주한다.\n"
-                        "2. 수치 절대 우선: 뉴스 제목의 톤보다 뉴스에 나온 등락 수치(+0.55% 등)를 최우선 팩트로 삼는다.\n"
-                        "3. 추세와 반등 구분: 며칠간 하락했더라도 마지막 지표가 상승이면 '단기 반등 성공'으로 해석하라.\n"
-                        "4. 연속성 원칙: '과거 분석 기록'에서 제시했던 주요 전망과 오늘 '원천 수급 지표'를 비교하여, 예측이 적중했는지 혹은 상황이 변했는지 반드시 언급하라.\n"
-                        "5. 전략적 수정: 지표 변화에 따라 포트폴리오 비중이나 투자 행동 지침을 유연하게 업데이트하라.\n"
+                        "당신은 데이터 기반의 퀀트 애널리스트처럼 행동해야 합니다. 감정적 해석을 배제하고 아래의 순서대로 데이터를 해석하여 결론을 도출하세요.\n\n"
+                        "1.  **시장 방향성 확인**: `KRX 시장 지표 요약`에서 코스피/코스닥 지수 등락을 보고 시장의 전반적인 방향(상승/하락/보합)을 먼저 정의합니다.\n"
+                        "2.  **주도 주체 식별**: `투자자 수급` 데이터에서 외국인과 기관 중 누가 시장을 주도했는지(순매수 규모)를 파악합니다.\n"
+                        "3.  **주도 섹터 특정**: `수급 상위 종목` 리스트에서 주도 주체(2번)가 집중적으로 매수한 종목들을 확인하여 '오늘의 주도 섹터'를 특정합니다. (예: 반도체, 자동차 등)\n"
+                        "4.  **섹터 강도 교차검증**: `주요 산업별 지수 현황`에서 3번에서 특정한 섹터의 지수가 실제로 상승했는지 교차 검증하여 분석의 신뢰도를 높입니다.\n"
+                        "5.  **뉴스 연계 해석**: 위 1~4번 과정으로 도출된 '데이터 기반 결론'(예: 외국인이 반도체 섹터를 강하게 매수하며 지수 상승을 견인)에 대한 이유나 배경을 `최근 주요 뉴스`에서 찾아내어 설명을 보강합니다. 뉴스는 데이터 분석을 뒷받침하는 근거로만 활용하세요.\n"
                     )
+
+                    # 🎯 2. [추가] 보고서 작성 형식 정의 (이 부분이 누락되어 에러가 발생함)
                     structure_instruction = (
                         "### [ 보고서 작성 형식 ]\n"
                         "각 항목은 아래의 구조를 반드시 엄수하여 작성하라:\n"
-                        "1. 시황 브리핑: 현재 시장의 핵심 테마를 한 줄 요약 후 전체적인 분위기 기술\n"
-                        "2. 주요 뉴스 및 오피니언: 제공된 뉴스 중 시장 영향력이 큰 발언이나 사건 인용\n"
-                        "3. 거시경제 분석: 환율, 금리, 수급 지표를 바탕으로 한 매크로 환경 진단\n"
-                        "4. 자산별 분석: 주식(국내/외), 채권, 가상자산, 원자재를 5점 척도로 평가\n"
-                        "5. 산업별 분석: 반도체, 금융, 에너지 등 주요 섹터를 5점 척도로 평가\n"
-                        "6. 주력/미래 산업 전망: 현재 주도주의 지속 가능성과 새롭게 부각되는 미래 먹거리 분석\n"
-                        "7. 리스크 분석: 현재 시장의 최대 뇌관 및 잠재적 위험 요소 2~3가지 지적\n"
-                        "8. 포트폴리오 및 전략: 구체적인 자산 배분 비중(%)과 사령관을 위한 투자 행동 지침 하달\n"
-                        "9. 수치 기록: 다음 보고서에서 참고하게 뉴스에서 수집한 경제지표를 날짜와 함께 기록\n"
+                        "1. 시황 브리핑 / 2. 주요 뉴스 및 오피니언 / 3. 거시경제 분석(수급 지표 포함) / "
+                        "4. 자산별 분석 / 5. 산업별 분석 / 6. 주력/미래 산업 전망 / "
+                        "7. 리스크 분석 / 8. 포트폴리오 및 전략(%) / 9. 수치 기록"
                     )
-                    
-                    # 프롬프트 구성: 지표(Fact)를 마지막에 배치하여 강조
                     full_instruction = (
-                        f"당신은 {council_instruction}\n"
+                        f"당신은 {council_instruction}이며, 지금부터 'KRX 데이터 분석 방법론'을 철저히 준수해야 합니다.\n"
                         f"현재 시각: {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                         f"{analysis_guideline}\n\n"
-                        f"--- [ 1. 과거 분석 기록 ] ---\n{historical_context}\n\n"
-                        f"--- [ 2. 분석 대상 뉴스 데이터 ] ---\n{news_context}\n\n"
-                        f"{structure_instruction}\n"
-                        f"**주의: 반드시 위 뉴스 데이터에 명시된 수치와 사건을 바탕으로 보고서를 작성하라.**"
+                        f"--- [ 과거 분석 기록 (참고용) ] ---\n{historical_context}\n\n"
+                        f"--- [ 최종 지시 ] ---\n"
+                        f"이제 제공될 데이터(KRX 원천 데이터, 최신 뉴스)를 바탕으로, 위 방법론과 과거 기록을 참고하여 아래 형식에 맞춰 투자 전략 보고서를 작성하세요.\n"
+                        f"{structure_instruction}"
                     )
                     
-                    # 실제 리포트 생성 (뉴스 본문은 content로 전달)
+                    # 리포트 생성 호출
                     report = get_ai_summary(
                         title=f"{date.today()} {r_type.upper()} 보고서", 
-                        content=news_context, 
+                        content=combined_data_for_ai, 
                         system_instruction=full_instruction, 
                         role="analyst"
                     )
