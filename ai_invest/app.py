@@ -40,19 +40,21 @@ def get_ai_summary(title, content, system_instruction=None, role="filter"):
     user_prompt = system_instruction if system_instruction else cfg.get("prompt", "")
     final_role = f"현재 시각: {now_time}\n분석 지침: {user_prompt}"
 
-    # 🎯 2. 호출 방식 및 API 키 로드 판별
-    # 구글 공식 API 주소인 경우에만 '진짜 제미나이 규격'으로 작동합니다.
-    is_direct_google = "googleapis.com" in base_url
+    # 🎯 2. [수정 포인트] 클라우드(Google 직접 호출) 여부 판별
+    # 모델명에 gemini가 있더라도, URL이 구글 주소일 때만 '진짜 클라우드'로 판정합니다.
+    is_direct_google = "generativelanguage.googleapis.com" in base_url
     
-    # 모델명에 gemini가 들어가는 경우(로컬 경유 포함) gemini_api_key를 우선 시도합니다.
-    if is_direct_google or "gemini" in model_name.lower():
-        api_key = cfg.get("key") if cfg.get("key") else config.get("gemini_api_key", "")
+    # API 키 선택 로직 강화
+    if is_direct_google:
+        # 구글 공식 서비스는 무조건 gemini_api_key 사용
+        api_key = config.get("gemini_api_key", "")
     else:
+        # 그 외(로컬/OpenAI 등)는 설정된 개별 키 -> OpenAI 키 순으로 시도
         api_key = cfg.get("key") if cfg.get("key") else config.get("openai_api_key", "")
 
-    # 🎯 3. 제공자별 URL 및 페이로드 구성
+    # 🎯 3. 호출 방식 분기 (URL 구조 기반)
     if is_direct_google:
-        # 🌐 [Case A] 구글 서버 직접 호출 방식
+        # 🌐 [Case A] 구글 서버 직접 호출 방식 (Gemini API 규격)
         url = f"{base_url}/v1beta/models/{model_name}:generateContent?key={api_key}"
         headers = {"Content-Type": "application/json"}
         payload = {
@@ -62,12 +64,11 @@ def get_ai_summary(title, content, system_instruction=None, role="filter"):
             "generationConfig": {"temperature": cfg.get("temperature", 0.3)}
         }
     else:
-        # 🏠 [Case B] 로컬 서버(Open WebUI 등) 또는 OpenAI 방식
-        # gemini-3-flash-preview:cloud 같은 모델도 이 로직을 타게 됩니다.
+        # 🏠 [Case B] 로컬 서버(Ollama/Open WebUI) 또는 OpenAI 방식 (Chat Completion 규격)
+        # 이제 gemini-3-flash-preview:cloud 모델도 주소가 로컬이면 이 로직을 탑니다.
         url = f"{base_url}/chat/completions"
         headers = {"Content-Type": "application/json"}
         if api_key:
-            # 로컬 서버 인증을 위해 Bearer 헤더를 사용합니다.
             headers["Authorization"] = f"Bearer {api_key}"
             
         payload = {
