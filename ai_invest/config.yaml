@@ -1,30 +1,30 @@
-name: "Local AI Analyst"
-description: "개별 RSS 필터링 및 ㅣ Local AI 연동 분석기"
-version: "2.0.3"
-slug: "local_ai_analyst"
+name: "AI Invest Lite Add-on"
+description: "개별 RSS 필터링 및 데스크탑 AI 연동 분석기"
+version: "2.4"
+url: "https://github.com/plplaaa2/ai_invest"
+slug: "ai_invest_lite"
 arch:
   - aarch64
   - amd64
 startup: "services"
 # Ingress 및 패널 설정
 ingress: true
-ingress_port: 8502
+ingress_port: 8501
 panel_icon: "mdi:chart-box-outline"
-panel_title: "Local AI Analyst"
+panel_title: "AI Invest Lite"
 # 파일 시스템 권한 (share 폴더 사용을 위해 필수)
 map:
   - share:rw
-  
 # 구성 옵션 및 스키마 정의
 options:
-  influx_token: "YOUR_INFLUX_TOKEN"
-  influx_url: "http://192.168.1.XXX:8086"
-  web_port: 8502
+  web_port: 8501
   openai_api_key: ""
   gemini_api_key: ""
 schema:
   web_port: int            # Streamlit 웹 UI 포트
-  influx_token: str        # InfluxDB v2 API 토큰
-  influx_url: str          # InfluxDB 주소 (http://IP:8086)
   openai_api_key: str?      
   gemini_api_key: str?
+
+
+
+
