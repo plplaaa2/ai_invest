@@ -2,104 +2,16 @@ import streamlit as st
 import pandas as pd
 from common import *
 from fpdf import FPDF
+from difflib import SequenceMatcher
 
-# app.py 내의 is_filtered 함수를 이 내용으로 교체하세요.
-def is_filtered(title, summary, g_inc, g_exc, l_inc="", l_exc=""):
-    """제목(Title)만을 기준으로 전역/개별 필터를 적용합니다."""
-    # 🎯 1. 대소문자 무시 및 공백 정리 
-    text = title.lower().strip()
-    
-    # 🎯 2. 제외 필터 (Exclude): 제목에 단 하나라도 포함되면 즉시 탈락 
-    exclude_str = f"{g_exc},{l_exc}"
-    exc_tags = [t.strip().lower() for t in exclude_str.split(",") if t.strip()]
-    if any(t in text for t in exc_tags): 
-        return False
-    
-    # 🎯 3. 전역 포함어 (Global Include): 설정된 경우, 제목에 반드시 있어야 통과 
-    g_inc_tags = [t.strip().lower() for t in g_inc.split(",") if t.strip()]
-    if g_inc_tags and not any(t in text for t in g_inc_tags):
-        return False
-        
-    # 🎯 4. 개별(피드) 포함어 (Local Include): 설정된 경우, 제목에 반드시 있어야 통과 
-    l_inc_tags = [t.strip().lower() for t in l_inc.split(",") if t.strip()]
-    if l_inc_tags and not any(t in text for t in l_inc_tags):
-        return False
-    
-    return True # 모든 검사를 통과함
+SIMILARITY_THRESHOLD = 0.85 # 85% 이상 유사하면 중복으로 간주
 
-def get_ai_summary(title, content, system_instruction=None, role="filter"):
-    """뉴스 판독 또는 요약을 위해 AI 모델을 호출합니다."""
-    now_time = get_now_kst().strftime('%Y-%m-%d %H:%M:%S')
-    
-    # 🎯 1. 설정 및 모델 정보 로드
-    cfg = data.get("filter_model") if role == "filter" else data.get("analyst_model")
-    base_url = cfg.get("url", "").rstrip('/')
-    model_name = cfg.get("name")
-    
-    # 지침 설정
-    user_prompt = system_instruction if system_instruction else cfg.get("prompt", "")
-    final_role = f"현재 시각: {now_time}\n분석 지침: {user_prompt}"
+def is_similar(a, b):
+    """두 문자열의 유사도를 계산합니다. (공백/특수문자 무시)"""
+    normalized_a = ''.join(filter(str.isalnum, a)).lower()
+    normalized_b = ''.join(filter(str.isalnum, b)).lower()
+    return SequenceMatcher(None, normalized_a, normalized_b).ratio()
 
-    # 🎯 2. [수정 포인트] 클라우드(Google 직접 호출) 여부 판별
-    # 모델명에 gemini가 있더라도, URL이 구글 주소일 때만 '진짜 클라우드'로 판정합니다.
-    is_direct_google = "generativelanguage.googleapis.com" in base_url
-    
-    # API 키 선택 로직 강화
-    if is_direct_google:
-        # 구글 공식 서비스는 무조건 gemini_api_key 사용
-        api_key = config.get("gemini_api_key", "")
-    else:
-        # 그 외(로컬/OpenAI 등)는 설정된 개별 키 -> OpenAI 키 순으로 시도
-        api_key = cfg.get("key") if cfg.get("key") else config.get("openai_api_key", "")
-
-    # 🎯 3. 호출 방식 분기 (URL 구조 기반)
-    if is_direct_google:
-        # 🌐 [Case A] 구글 서버 직접 호출 방식 (Gemini API 규격)
-        url = f"{base_url}/v1beta/models/{model_name}:generateContent?key={api_key}"
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "contents": [{
-                "parts": [{"text": f"시스템 지침: {final_role}\n\n사용자 입력:\n제목: {title}\n본문: {content}"}]
-            }],
-            "generationConfig": {"temperature": cfg.get("temperature", 0.3)}
-        }
-    else:
-        # 🏠 [Case B] 로컬 서버(Ollama/Open WebUI) 또는 OpenAI 방식 (Chat Completion 규격)
-        # 이제 gemini-3-flash-preview:cloud 모델도 주소가 로컬이면 이 로직을 탑니다.
-        url = f"{base_url}/chat/completions"
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-            
-        payload = {
-            "model": model_name,
-            "messages": [
-                {"role": "system", "content": final_role},
-                {"role": "user", "content": f"제목: {title}\n본문: {content}"}
-            ],
-            "temperature": cfg.get("temperature", 0.3)
-        }
-
-    try:
-        # 🎯 4. 요청 전송 (타임아웃 10분)
-        resp = requests.post(url, json=payload, headers=headers, timeout=600)
-        resp.raise_for_status()
-        result = resp.json()
-
-        # 🎯 5. 응답 구조 판별 및 추출
-        # 구글 직접 호출인 경우 'candidates' 구조를 가집니다.
-        if "candidates" in result:
-            return result['candidates'][0]['content']['parts'][0]['text']
-        # 로컬 서버/OpenAI인 경우 'choices' 구조를 가집니다.
-        else:
-            return result['choices'][0]['message']['content']
-
-    except requests.exceptions.Timeout:
-        return "❌ [TIMEOUT] AI 분석 시간이 10분을 초과했습니다."
-    except Exception as e:
-        print(f"[{now_time}] AI 분석 에러: {str(e)}")
-        return f"❌ [ERROR] AI 분석 중 예외 발생: {str(e)}"
-        
 @st.dialog("📊 AI 정밀 분석 리포트")
 def show_analysis_dialog(title, summary_text, pub_dt, role="filter"): 
     with st.spinner("AI가 뉴스를 심층 분석 중입니다..."):
@@ -142,123 +54,67 @@ def show_analysis_dialog(title, summary_text, pub_dt, role="filter"):
         f"📊 분석 모드: {'단기 판독' if role == 'filter' else '심층 전략'}"
     )
 
-def check_filters(title, include_str, exclude_str):
-    title = title.lower().strip()
-    if exclude_str:
-        exc_tags = [t.strip().lower() for t in exclude_str.split(",") if t.strip()]
-        if any(t in title for t in exc_tags): return False
-    if include_str:
-        inc_tags = [t.strip().lower() for t in include_str.split(",") if t.strip()]
-        if not any(t in title for t in inc_tags): return False
-    return True
-
-def clean_html(raw_html):
-    if not raw_html: return "요약 내용 없음"
-    soup = BeautifulSoup(raw_html, "html.parser")
-    for s in soup(['style', 'script', 'span']): s.decompose()
-    return re.sub(r'\s+', ' ', soup.get_text()).strip()
-    
 def parse_rss_date(date_str):
     try:
         p = feedparser._parse_date(date_str)
         return datetime.fromtimestamp(time.mktime(p))
-    except: return datetime.now()
+    except: return get_now_kst()
 
-def load_pending_files(range_type, target_feed=None):
-    """
-    단계별 로그를 통해 원인을 파악하는 뉴스 로더
-    """
-    news_list = []
-    if not os.path.exists(PENDING_PATH):
-        st.error(f"❌ 경로 미존재: {PENDING_PATH}")
-        return news_list
+def format_korean_unit(num):
+    """숫자를 조, 억 단위로 변환합니다."""
+    if num is None or num == 0: return "0"
+    if num >= 1e12:
+        return f"{num / 1e12:.2f}조"
+    elif num >= 1e8:
+        return f"{num / 1e8:.2f}억"
+    elif num >= 1e4:
+        return f"{num / 1e4:.1f}만"
+    return f"{num:,.0f}"
+
+def render_metric_grid(symbols, grid_cols=4):
+    """카테고리별 단위 포맷팅을 자동으로 적용하여 버튼 렌더링"""
+    for i in range(0, len(symbols), grid_cols):
+        row_syms = symbols[i : i + grid_cols]
+        cols = st.columns(grid_cols)
         
-    # 🔍 로그 1: 물리적 파일 검색
-    all_files = os.listdir(PENDING_PATH)
-    target_files = [f for f in all_files if f.endswith(".json") or f.endswith(".txt")]
-    print(f"🔍 [STEP 1] 전체 파일: {len(all_files)}개 | 대상 확장자: {len(target_files)}개")
-
-    now_kst = get_now_kst()
-    today_date = now_kst.date()
-    # 시간대 정보 제거(naive) 버전 준비 (비교용)
-    one_week_ago = (now_kst - timedelta(days=7)).replace(tzinfo=None)
-    
-    parse_fail = 0
-    filter_fail = 0
-
-    for filename in target_files:
-        fpath = os.path.join(PENDING_PATH, filename)
-        try:
-            with open(fpath, 'r', encoding='utf-8') as f:
-                if filename.endswith(".json"):
-                    data = json.load(f)
-                    title = data.get('title', '제목 없음')
-                    pub_str = data.get('pub_dt', '')
-                    
-                    # 🎯 날짜 파싱 강화 (pub_dt_str 형식: %Y-%m-%d %H:%M:%S)
-                    try:
-                        pub_dt = datetime.strptime(pub_str, '%Y-%m-%d %H:%M:%S')
-                    except:
-                        # 파싱 실패 시 파일 수정 시간으로 강제 복구
-                        pub_dt = datetime.fromtimestamp(os.path.getmtime(fpath))
-                    
-                    link = data.get('link', '')
-                    summary = data.get('summary', '')
-                    source = data.get('source', '저장된 데이터')
-                else:
-                    lines = f.read().splitlines()
-                    if len(lines) < 3: continue
-                    title = lines[0].replace("제목: ", "")
-                    pub_str = lines[2].replace("날짜: ", "")
-                    pub_dt = parse_rss_date(pub_str)
-                    link = lines[1].replace("링크: ", "")
-                    summary = "\n".join(lines[3:]).replace("요약: ", "")
-                    source = "저장된 데이터"
-
-                # 🔍 로그 2: 필터링 전 데이터 확보 확인
-                # 시간대 정보가 섞여 비교 에러가 나는 것을 방지
-                pub_dt_naive = pub_dt.replace(tzinfo=None) if pub_dt.tzinfo else pub_dt
-                
-                # 필터링 로직
-                if range_type == "오늘" and pub_dt_naive.date() != today_date:
-                    filter_fail += 1
-                    continue
-                if range_type == "일주일" and pub_dt_naive < one_week_ago:
-                    filter_fail += 1
-                    continue
-                
-                if target_feed:
-                    if not check_filters(title, target_feed.get('include', ""), target_feed.get('exclude', "")):
-                        filter_fail += 1
-                        continue
-                
-                news_list.append({
-                    "title": title, "link": link, "published": pub_str, 
-                    "summary": summary, "pub_dt": pub_dt_naive, "source": source
-                })
-
-        except Exception as e:
-            parse_fail += 1
-            print(f"❌ [에러] {filename} 로드 실패: {e}")
-            continue
+        for j, sym in enumerate(row_syms):
+            m, p_hist, _, _ = get_metric_data(sym)
+            if not m or 'price' not in m: continue
             
-    # 🔍 로그 3: 최종 결과 집계
-    print(f"✅ [STEP 2] 최종 로드: {len(news_list)}개 | 파싱실패: {parse_fail} | 기간/필터제외: {filter_fail}")
+            curr = m['price']
+            prev = m.get('prev_close', p_hist[0] if p_hist else curr)
+            diff = curr - prev
+            diff_pct = (diff / prev * 100) if prev != 0 else 0
+            icon = "🔺" if diff > 0 else "🔻" if diff < 0 else "─"
+            
+            # 🎯 [동적 단위 포맷팅 로직 통합]
+            # 1. 환율 및 국내 금
+            if "KRW" in sym or "KOR_GOLD" in sym: val_str = f"{curr:,.1f}원"
+            # 2. 원자재 및 국제 금
+            elif sym in ["WTI", "NAT_GAS", "COPPER", "US_GOLD"]: val_str = f"${curr:,.2f}"
+            # 3. 달러 인덱스
+            elif sym == "DXY": val_str = f"{curr:.2f}pt"
+            # 4. 연준 자산 (T/B 단위)
+            elif sym == "FED_ASSETS": val_str = f"${curr/1_000_000:.2f}T"
+            elif sym in ["RRP", "RESERVES", "US_TGA", "US_SRF", "BTFP", "US_M2"]: val_str = f"${curr/1_000:.1f}B"
+            # 5. 수급 (억 단위)
+            elif sym in CAT_FUNDS: val_str = f"{curr:,.1f}억"
+            # 6. 금리 및 물가/고용 (%)
+            elif any(x in sym for x in ["RATE", "UNRATE", "INFL", "CPI", "PCE", "PPI", "SOFR", "EFFR", "Y"]):
+                val_str = f"{curr:.2f}%"
+            # 7. 기타 (지수 등)
+            else: val_str = f"{curr:,.1f}"
+
+            # 변동 표시 (수급은 억 단위 변동액 표시, 나머지는 % 표시)
+            change_str = f"{diff:+,.1f}억" if sym in CAT_FUNDS else f"{diff_pct:+.2f}%"
+            btn_label = f"{display_names.get(sym, sym)}\n\n{val_str}\n{icon} {change_str}"
+            
+            if cols[j].button(btn_label, key=f"btn_{sym}", width='stretch'):
+                st.session_state.selected_chart = sym
+                st.rerun()
+                
+
     
-    news_list.sort(key=lambda x: x['pub_dt'], reverse=True)
-    return news_list
-
-def save_data(data):
-    """변경된 설정 데이터를 JSON 파일로 안전하게 저장합니다."""
-    # 폴더가 없으면 자동으로 생성합니다.
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    
-    # 파일을 열어 딕셔너리 데이터를 기록합니다.
-    with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
-        # 한글 깨짐 방지 및 가독성을 위해 옵션을 추가합니다.
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
 # --- 3. UI 및 CSS 설정 ---
 st.set_page_config(page_title="AI Analyst", layout="wide")
 
@@ -272,14 +128,14 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 
-if 'active_menu' not in st.session_state: st.session_state.active_menu = "뉴스"
+if 'active_menu' not in st.session_state: st.session_state.active_menu = "시장"
 if 'current_feed_idx' not in st.session_state: st.session_state.current_feed_idx = "all"
 if 'page_number' not in st.session_state: st.session_state.page_number = 1
 
 # --- 4. 최상단 대메뉴 ---
 st.title("🤖 AI Analyst System")
-m_cols = st.columns(3)
-menu_items = [("📡 뉴스 스트리밍", "뉴스"), ("🏛️ AI 투자 보고서", "AI"), ("⚙️ 설정", "설정")]
+m_cols = st.columns(4)
+menu_items = [("📈 시장 지표", "시장"), ("📡 뉴스 스트리밍", "뉴스"), ("🏛️ AI 투자 보고서", "AI"), ("⚙️ 설정", "설정")]
 
 for i, (label, m_key) in enumerate(menu_items):
     if m_cols[i].button(label, width='stretch', type="primary" if st.session_state.active_menu == m_key else "secondary"):
@@ -358,15 +214,331 @@ if st.session_state.active_menu == "설정":
     st.write("") # 간격 조절
         
 
+elif st.session_state.active_menu == "시장":
+    # 1. 초기 선택값 및 상태 설정
+    if 'selected_chart' not in st.session_state:
+        st.session_state.selected_chart = "KOSPI"
+
+
+    try:
+        # --- (상단) 지표 요약 탭: 클릭 시 연동 ---
+        st.subheader("📊 주요 시장 지표 요약 (클릭 시 하단 차트 연동)")
+        
+        # 탭 구성 (5단 분리)
+        t1, t2, t3, t4, t5 = st.tabs([
+            "🏛️ 주요 지수", "🌍 환율/원자재", "🏦 금리/수급", "🏦 연준 유동성", "🛒 물가/고용"
+        ])
+
+
+        # 🏛️ [t1] 주요 지수 탭
+        with t1:
+            st.markdown("##### [ 🏛️ 주요 국내외 지수 및 선물 ]")
+            render_metric_grid(CAT_INDICES, 4)
+
+
+
+        # 🌍 [t2] 환율/원자재 탭
+        with t2:
+            st.markdown("##### [ 🌍 글로벌 환율 및 원자재 현황 ]")
+            render_metric_grid(CAT_FX_CMD, 4)
+
+
+
+        # 🏦 [t3] 금리/수급 탭
+        with t3:
+            st.markdown("##### [ 🏦 국채 금리 및 증시 수급 ]")
+            render_metric_grid(CAT_RATES, len(CAT_RATES)) # 금리는 한 줄 배치
+            st.write("")
+            render_metric_grid(CAT_FUNDS, len(CAT_FUNDS)) # 수급도 한 줄 배치     
+
+        # 🏛️ [t4] 연준 유동성 탭
+        with t4:
+            st.markdown("##### [ 🏛️ 연준 유동성 및 자금 시장 ]")
+            render_metric_grid(CAT_MACRO_1, 5)
+
+
+        # 🛒 [t5] 물가/고용 탭
+        with t5:
+            st.markdown("##### [ 🛒 물가 및 고용 경제 지표 ]")
+            render_metric_grid(CAT_MACRO_2, 4)
+
+        st.divider()
+
+
+        # --- (하단) 상세 차트 대시보드 섹션 ---
+        target = st.session_state.selected_chart
+        st.subheader(f"📈 {display_names.get(target, target)} 상세 분석")
+
+
+        # 차트 옵션 설정
+        c_range = st.radio("조회 기간", ["1개월", "3개월", "6개월", "1년"], horizontal=True, index=1)
+        days_map = {"1개월": 30, "3개월": 90, "6개월": 180, "1년": 365}
+
+
+        # 상세 데이터 호출
+        m_data, p_hist, l_t, q_api = get_metric_data(target)
+
+
+        if m_data and 'price' in m_data:
+            curr = m_data['price']
+            # 🎯 차트 기간과 무관하게 '전일 종가' 고정 사용
+            prev = m_data.get('prev_close', curr)
+            diff = curr - prev
+            diff_pct = (diff / prev * 100) if prev != 0 else 0
+
+
+            # 메트릭 레이아웃
+            st.write("")
+            c1, c2, c3, c4 = st.columns(4)
+            
+            with c1:
+                st.metric("현재가", f"{curr:,.2f}")
+            with c2:
+                # 이제 코스피 -4%대가 정확히 찍힙니다.
+                st.metric("변동폭", f"{diff:+,.2f}", f"{diff_pct:+,.2f}%")
+            with c3:
+                # 🎯 1순위: 수급/자금 지표 (금일 수급 표시)
+                if target in CAT_FUNDS or "NET" in target:
+                    st.metric("금일 수급", f"{curr:,.1f}억")
+                
+                # 🎯 2순위: 금리/FED/매크로 (거래량 대신 날짜/시간 표시)
+                elif "RATE" in target or "FED" in target or target in CAT_MACRO or "Y" in target[-1:]:
+                    st.metric("업데이트", l_t)
+                
+                # 🎯 3순위: 그 외 일반 지수/주식 (거래량 표시)
+                else:
+                    vol = m_data.get('volume', 0)
+                    st.metric("거래량", f"{format_korean_unit(vol)}주")
+
+            with c4:
+                # 🎯 1순위: 거래 데이터가 있는 일반 지수/주식 (거래대금 표시)
+                if target not in CAT_FUNDS and "NET" not in target and "RATE" not in target and "FED" not in target and target not in CAT_MACRO:
+                    val = m_data.get('value', 0)
+                    st.metric("거래대금", f"{format_korean_unit(val)}원")
+                
+                # 🎯 2순위: 나머지는 수치나 상태 표시 (중복 방지)
+                else:
+                    if "RATE" in target or "FED" in target:
+                        st.metric("상태", "정상 수집")
+                    else:
+                        st.metric("데이터", "통계")
+
+
+# 상세 차트 시각화
+            if q_api:
+                is_supply = "NET" in target
+                lookback_str = "365d"
+                agg_window = "1d" if days_map[c_range] >= 180 else "1h"
+                
+                chart_q = (
+                    f'from(bucket: "{INFLUX_BUCKET}") '
+                    f'|> range(start: -{lookback_str}) '
+                    f'|> filter(fn: (r) => r._measurement == "financial_metrics" and r.symbol == "{target}") '
+                    f'|> filter(fn: (r) => r._field == "price" or r._field == "value") '
+                    f'|> aggregateWindow(every: {agg_window}, fn: last, createEmpty: false) '
+                    f'|> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")'
+                )
+
+                try:
+                    query_result = q_api.query(chart_q)
+                    df_list = []
+                    zero_is_fine = ["US_SRF", "BTFP", "US_REVERSE_REPO", "US_RESERVES"]
+                    
+                    for table in query_result:
+                        for r in table.records:
+                            val = r.values.get('price') if r.values.get('price') is not None else r.values.get('value')
+                            if val is not None:
+                                if is_supply or target in zero_is_fine or val > 0:
+                                    df_list.append({"time": r.get_time(), "Value": val})
+
+                    df = pd.DataFrame(df_list)
+
+                    if not df.empty:
+                        # 통계값 계산
+                        hi_val, lo_val = df['Value'].max(), df['Value'].min()
+                        position = ((curr - lo_val) / (hi_val - lo_val) * 100) if hi_val != lo_val else 50.0
+                        
+                        df = df.sort_values("time").drop_duplicates("time")
+                        
+                        # 20일 이동평균선
+                        if target in CAT_INDICES:
+                            df['20MA'] = df['Value'].rolling(window=480, min_periods=1).mean()
+
+                        # 선택 기간 필터링
+                        cutoff_date = df['time'].max() - pd.Timedelta(days=days_map[c_range])
+                        df = df[df['time'] >= cutoff_date]
+                        df = df[df['Value'].diff() != 0].set_index("time")
+
+                        # Vega-Lite 시각화
+                        st.write("")
+                        chart_df = df.reset_index()
+
+                        # 🛠️ 줌 기능 보강 및 그리드 흐리게 설정 (안정화 버전)
+                        final_spec = {
+                            "width": "container",
+                            "height": 450,
+                            "layer": [
+                                {
+                                    # 줌/이동을 위한 셀렉션 정의
+                                    "selection": {
+                                        "grid": {
+                                            "type": "interval", 
+                                            "bind": "scales"
+                                        }
+                                    },
+                                    "mark": {"type": "line", "color": "#FF0000", "strokeWidth": 2,"interpolate": "monotone", "connectNulls": False },
+                                    "encoding": {
+                                        "x": {"field": "time", "type": "temporal", "title": None, "axis": {"format": "%m/%d %H:%M"}},
+                                        "y": {
+                                            "field": "Value", 
+                                            "type": "quantitative", 
+                                            "scale": {"zero": is_supply, "nice": True},
+                                            "title": None
+                                        },
+                                        "tooltip": [
+                                            {"field": "time", "type": "temporal", "title": "시간", "format": "%Y-%m-%d %H:%M"},
+                                            {"field": "Value", "type": "quantitative", "title": "값", "format": ",.2f"}
+                                        ]
+                                    }
+                                }
+                            ],
+                            "config": {
+                                "view": {"stroke": "transparent"},
+                                "axis": {
+                                    "grid": True,
+                                    "gridColor": "#eeeeee",
+                                    "gridOpacity": 0.1, # 훨씬 더 흐리게 조절
+                                    "gridDash": [3, 3]
+                                }
+                            }
+                        }
+
+                        if '20MA' in chart_df.columns:
+                            ma_layer = {
+                                "mark": {"type": "line", "color": "#29b5e8", "strokeDash": [4, 4], "opacity": 0.7},
+                                "encoding": {
+                                    "x": {"field": "time", "type": "temporal"},
+                                    "y": {"field": "20MA", "type": "quantitative"}
+                                }
+                            }
+                            final_spec["layer"].append(ma_layer)
+                        
+                        st.vega_lite_chart(chart_df, final_spec, width='stretch')
+
+
+                        # 분석 요약 정보
+                        st.caption(f"📊 {display_names.get(target, target)}: {c_range} 추세 분석")
+                        st.write("")
+                        
+                        col_a, col_b = st.columns([2, 1])
+                        with col_a:
+                            st.info(f"✨ **{c_range} 가격 범위**: 최고 **{hi_val:,.2f}** / 최저 **{lo_val:,.2f}**")
+                        with col_b:
+                            st.metric("현재 위치(%)", f"{position:.1f}%", help="최저점 대비 현재가 위치")
+
+
+                        st.write("---")                        
+# 1️⃣ [데이터 수집] SGI 분석에 필요한 7대 지표를 먼저 로드합니다.
+                    # [2026-02-07] 이 블록이 반드시 calculate_and_save_sgi 호출보다 위에 있어야 합니다.
+                        sgi_symbols = ["KOSPI", "KOR_NET_FOR", "KOR_NET_INST", "KOR_NET_RETAIL", "KOR_DEPOSIT", "KOR_CREDIT_LOAN", "USD_KRW"]
+                        sgi_data_dict = {}
+                    
+                        for s_sym in sgi_symbols:
+                            m_val, p_hist, _, _ = get_metric_data(s_sym)
+                            
+                            key_name = "KOR_NET_RETAIL" if s_sym == "KOR_NET_IND" else s_sym
+                            
+                            if m_val:
+                                sgi_data_dict[s_sym] = {
+                                    'curr': m_val.get('price', 0),
+                                    'prev': p_hist[0] if (p_hist and len(p_hist) > 0) else m_val.get('price', 0),
+                                    'hist': p_hist if p_hist else []
+                                }
+                            else:
+                                sgi_data_dict[s_sym] = {'curr': 0, 'prev': 0, 'hist': []}
+                        sgi_score, g_f, g_i, g_r, omega, avg_fx_3m = calculate_and_save_sgi(write_api, INFLUX_BUCKET, sgi_data_dict)
+                        inertia_val = get_sgi_inertia(query_api, INFLUX_BUCKET) 
+
+                        # 🎯 2. 휴장 및 정체 판정 (app.py에서 직접 수행)
+                        import datetime
+                        now = datetime.datetime.now()
+                        is_weekend = now.weekday() >= 5
+                        delta_val = abs(sgi_data_dict['KOSPI']['curr'] - sgi_data_dict['KOSPI']['prev'])
+                        is_stagnant = delta_val < 0.1
+
+                        # 🎯 3. UI 출력 섹션
+                        st.subheader("📊 수급 중력 분석 (SGI 2.0)")                  
+                        
+                        if is_weekend or (abs(sgi_data_dict['KOSPI']['curr'] - sgi_data_dict['KOSPI']['prev']) < 0.1):
+                            st.caption("⚠️ 현재 휴장일 또는 지수 변동 정체기로 인해 수치가 왜곡될 수 있습니다.")
+
+                        col_sgi1, col_sgi2, col_sgi3 = st.columns([1, 1, 2]) 
+                        
+                        with col_sgi1:
+                            st.metric("SGI 에너지", f"{sgi_score:,.2f}", delta=f"ω: {omega:.2f}")
+                            st.caption(f"Ref(3M Avg): {avg_fx_3m:,.1f}원")
+
+                        with col_sgi2:
+                            # 🎯 관성(Inertia) 메트릭 배치
+                            i_delta = "강력" if abs(inertia_val) > 300 else "보통"
+                            st.metric("추세 관성 (5D)", f"{inertia_val:,.1f}", delta=i_delta)
+                            st.caption("누적 수급 질량")
+
+                        with col_sgi3:
+                            # 상태 판독 및 메시지 출력
+                            retail_msg = " | 🧱 매물 압박" if g_r > 5 else " | 🎈 가벼움" if g_r < -5 else ""
+                            
+                            if sgi_score < -100:
+                                st.error(f"**🔴 1단계: 강한 수급 이탈**\n\n외인 매도 압력이 지수 방어력을 압도 중입니다. (하방 가속)")
+                            elif sgi_score > 150:
+                                st.success(f"**🚀 5단계: 수급 과밀 상승**\n\n저항 돌파! {retail_msg} 무중력 도약 구간입니다.")
+                            else:
+                                stage_desc = "🟢 4단계: 상승 탄력 확보" if sgi_score > 50 else "🟡 3단계: 수급 평형 구간" if sgi_score > -50 else "🟠 2단계: 하방 압력 우세"
+                                st.info(f"**{stage_desc}**\n\n에너지 {sgi_score:,.1f}와 관성 {inertia_val:,.1f}를 종합 분석 중입니다.")
+
+                        st.write("")
+                        # 물리 지표 상세 분석 (4분할)
+                        c1, c2, c3, c4 = st.columns(4)
+                        with c1:
+                            st.caption("**외인 수급 강도**")
+                            st.write(f"Gf: {g_f:,.1f}")
+                            st.write('⚡ 주도' if abs(g_f)>15 else '☁️ 관망')
+                        with c2:
+                            st.caption("**기관 지원 강도**")
+                            st.write(f"Gi: {g_i:,.1f}")
+                            st.write('🛡️ 방어' if g_i>0 else '💣 파손')
+                        with c3:
+                            st.caption("**개인 매물 저항**")
+                            st.write(f"Gr: {g_r:,.1f}")
+                            st.write('🧱 압박' if g_r>5 else '🎈 가벼움')
+                        with c4:
+                            st.caption("**환율 매질 저항**")
+                            st.write(f"ω: {omega:.2f}")
+                            st.write('🍃 진공' if omega>1 else '🌊 늪지대')
+
+                        st.caption(f"※ SGI 2.0: 3개월 평균 환율({avg_fx_3m:,.1f}원) 대비 현재 수급의 물리적 효율을 분석합니다.")
+
+                    else:
+                        st.info("차트용 데이터가 부족합니다.")
+
+
+                except Exception as e:
+                    st.error(f"차트 로딩 실패: {e}")
+
+
+    except Exception as e:
+        st.error(f"시장 데이터 로드 중 오류 발생: {e}")
+
 # [2. 뉴스 스트리밍]
-if st.session_state.active_menu == "뉴스":    
+elif st.session_state.active_menu == "뉴스":    
     # 🎯 1. 사이드바 상태 관리 세션 초기화
     if 'show_rss_sidebar' not in st.session_state:
         st.session_state.show_rss_sidebar = False # 기본으로 닫아두어 광폭 화면 확보
 
     # 🎯 2. 최상단 컨트롤 바
     t_col1, t_col2 = st.columns([0.8, 0.2])
-
+    
+# --- [ 수정된 안전한 이름 결정 로직 ] ---
     try:
         if st.session_state.current_feed_idx == "all":
             current_f_name = "🏠 전체 뉴스"
@@ -401,42 +573,94 @@ if st.session_state.active_menu == "뉴스":
         col_main, col_side = st.columns([0.999, 0.001])
 
     with col_main:
-        full_list = []
-        target = data.get('feeds', []) if st.session_state.current_feed_idx == "all" else [data['feeds'][st.session_state.current_feed_idx]]
+        selected_idx = st.session_state.current_feed_idx
         
-        for f_info in target:
+        # 🎯 1. target_feed 결정 로직
+        if selected_idx == "all":
+            target_feed = None
+        else:
             try:
-                parsed = feedparser.parse(f_info['url'])
-                for e in parsed.entries:
-                    # 강화된 제목 필터 적용 (버그 수정됨)
-                    if is_filtered(e.title, e.get('summary', ''), 
-                                   data.get("global_include", ""), data.get("global_exclude", ""),
-                                   f_info.get('include', ""), f_info.get('exclude', "")):
-                        e['source'] = f_info['name']
-                        full_list.append(e)
-            except: continue
-            
-        full_list.sort(key=lambda x: x.get('published_parsed', 0), reverse=True)
+                feeds = data.get('feeds', [])
+                idx = int(selected_idx)
+                target_feed = feeds[idx] if 0 <= idx < len(feeds) else None
+            except:
+                target_feed = None
+                
+        # 🎯 2. 데이터 로드 및 정렬 키 수정
+        full_list = load_pending_files("일주일", target_feed=target_feed)
+        # JSON 로더의 pub_dt 객체를 사용하여 최신순 정렬
+        full_list.sort(key=lambda x: x.get('pub_dt', get_now_kst()), reverse=True)
         
         if full_list:
             items_per_page = 10
             total_pages = math.ceil(len(full_list) / items_per_page)
+            
+            if st.session_state.page_number > total_pages:
+                st.session_state.page_number = 1
+                
             start_idx = (st.session_state.page_number - 1) * items_per_page
             
-            for entry in full_list[start_idx : start_idx + items_per_page]:
+# 🎯 3. 뉴스 카드 렌더링 루프
+            current_page = st.session_state.page_number
+            
+            for i, entry in enumerate(full_list[start_idx : start_idx + items_per_page]):
+                # 🔗 AI 요약 버튼을 위한 고유 식별자 생성
+                safe_link = entry.get('link', 'no_link')[-30:] 
+                unique_key = f"p{current_page}_idx{i}_{safe_link}"
+                
                 with st.container(border=True):
-                    st.caption(f"📍 {entry.get('source')} | {entry.get('published', '')}")
+                    # KST 시각 표시
+                    display_time = entry['pub_dt'].strftime('%Y-%m-%d %H:%M:%S')
+                    st.caption(f"📍 {entry.get('source')} | 🕒 {display_time} (KST)")
                     st.markdown(f"#### {entry.get('title')}")
                     
                     cleaned_summary = clean_html(entry.get('summary', ''))
                     st.write(cleaned_summary[:200] + "...")
                     
                     btn_c1, btn_c2 = st.columns([0.2, 0.8])
+                    
+                    # 🌐 [교정] link_button에는 key 인자를 넣지 않습니다.
                     btn_c1.link_button("🌐 원문", entry.get('link', '#'), width='stretch')
-                    if btn_c2.button("🤖 AI 요약", key=f"ai_{entry.get('link')}", width='stretch'):
-                        show_analysis_dialog(entry.get('title'), cleaned_summary, entry.get('published', '날짜 미상'), role="filter")
+                    
+                    # 🤖 AI 요약 버튼은 고유 key가 반드시 필요합니다.
+                    if btn_c2.button("🤖 AI 요약", key=f"ai_btn_{unique_key}", width='stretch'):
+                        show_analysis_dialog(entry.get('title'), cleaned_summary, display_time, role="filter")
 
-            # 페이지네이션 로직 (기존과 동일하되 띄어쓰기 정돈)
+            st.write("")
+            if total_pages > 1:
+                # 10개씩 묶어서 표시 (예: 1~10, 11~20)
+                current_group = (st.session_state.page_number - 1) // 10
+                start_page = current_group * 10 + 1
+                end_page = min(start_page + 9, total_pages)
+                
+                # 버튼 레이아웃 설정
+                nav_cols = st.columns([0.6] + [1] * (end_page - start_page + 1) + [0.6])
+                
+                # [ < ] 이전 묶음 버튼
+                if start_page > 1:
+                    if nav_cols[0].button("<", key="prev_group"):
+                        st.session_state.page_number = start_page - 1
+                        st.rerun()
+                
+                # 숫자 버튼들
+                for i, page_idx in enumerate(range(start_page, end_page + 1)):
+                    if nav_cols[i+1].button(
+                        str(page_idx), 
+                        key=f"page_btn_{page_idx}",
+                        type="primary" if st.session_state.page_number == page_idx else "secondary",
+                        use_container_width=True
+                    ):
+                        st.session_state.page_number = page_idx
+                        st.rerun()
+                
+                # [ > ] 다음 묶음 버튼
+                if end_page < total_pages:
+                    if nav_cols[-1].button(">", key="next_group"):
+                        st.session_state.page_number = end_page + 1
+                        st.rerun()
+        else:
+            st.warning("📡 수집된 뉴스 데이터가 없습니다.")
+            
             st.write("")
             
             # --- [ 4. 개선된 페이지 내비게이터 ] ---
@@ -471,8 +695,8 @@ if st.session_state.active_menu == "뉴스":
                     if nav_cols[-1].button(">", key="next_group"):
                         st.session_state.page_number = end_page + 1
                         st.rerun()
-        else:
-            st.warning("📡 표시할 뉴스가 없습니다.")
+            else:
+                st.warning("📡 표시할 뉴스가 없습니다.")
     
 # --- 사이드바 (RSS 관리) 구역 (오른쪽) ---
     with col_side:
@@ -574,7 +798,7 @@ if st.session_state.active_menu == "뉴스":
 elif st.session_state.active_menu == "AI":
     st.subheader("📑 AI 투자 사령부 보고서")
     
-    # 1. 기초 설정 (기존 경로 및 세션 유지)    
+    # 1. 기초 설정 (기존 경로 및 세션 유지)
     DIR_MAP = {'daily': '01_daily', 'weekly': '02_weekly', 'monthly': '03_monthly'}
     
     if "report_chat_history" not in st.session_state:
@@ -607,13 +831,14 @@ elif st.session_state.active_menu == "AI":
             
             if c2.button("📖 로드", key=f"load_{r_type}", width='stretch', disabled=not r_files):
                 with open(os.path.join(target_dir, selected_f), "r", encoding="utf-8") as f:
-                    st.session_state.last_report_content = f.read()
+                    st.session_state.last_report_content = f.read()                    
                 st.rerun()
 
             st.divider()
 
             # 🚀 보고서 생성 버튼
             if st.button(f"🚀 새 {r_type.upper()} 보고서 생성 ({r_days}일 분석)", type="primary", width='stretch', key=f"gen_{r_type}"):
+                # 디버그
                 st.info(f"🔍 시스템 경로 확인 중...")
                 abs_path = os.path.abspath(PENDING_PATH)
                 st.write(f"📍 현재 PENDING_PATH (절대경로): `{abs_path}`")
@@ -627,92 +852,15 @@ elif st.session_state.active_menu == "AI":
                 st.session_state.report_chat_history = []
                 
                 with st.spinner(f"AI 애널리스트가 {r_days}일치 데이터를 통합 분석 중..."):
-                    # [A] 과거 맥락 및 시장 지표 로드 (추가됨)
-                    historical_context = load_historical_contexts()
-                    
-                    # 🎯 신규: KRX 실시간 지표 수집 (common.py 함수 활용)
-                    market_indicators = get_krx_market_indicators()
-                    top_investors = get_krx_top_investors()
-                    sector_indices = get_krx_sector_indices()
-
-                    # [C] 뉴스 데이터 로드 (기존 유지)
-                    raw_news = load_pending_files("일주일")
-                    if not raw_news:
-                        st.error(f"📍 유효한 뉴스 데이터가 없습니다.")
-                        st.stop()
-                    
-                    now = datetime.now()
-                    lookback_days = 3 if now.weekday() in [5, 6, 0] else 2           
-                    news_target_dt = now - timedelta(days=lookback_days)
-                    
-                    recent_news = [n for n in raw_news if n['pub_dt'].replace(tzinfo=None) >= news_target_dt]
-                    recent_news.sort(key=lambda x: x['pub_dt'], reverse=True)                    
-                   
-                    news_limit = data.get("report_news_count", 100)
-                    news_items = []
-                    
-                    for n in recent_news[:news_limit]:
-                        summary = clean_html(n.get('summary', ''))[:150]
-                        time_str = n['pub_dt'].strftime('%m/%d %H:%M')
-                        news_items.append(f"[{time_str}] {n['title']}\n   - 요약: {summary}")
-                    
-                    # 🎯 데이터 통합: KRX 지표와 뉴스를 명확히 구분하여 AI의 혼동을 방지
-                    combined_data_for_ai = (
-                        f"--- [ 1. KRX 원천 데이터 (Source of Truth) ] ---\n"
-                        f"{market_indicators}\n"
-                        f"{top_investors}\n"
-                        f"{sector_indices}\n\n"
-                        f"--- [ 2. 참고용 최신 뉴스 ] ---\n" + "\n".join(news_items)
-                    )
-
-                    # 💡 [로그 추가] AI에게 전달될 최종 데이터 확인
-                    print("\n" + "="*50)
-                    print("🤖 [AI 입력 데이터 확인] 수동 보고서 생성을 위해 아래 데이터를 AI에 전달합니다.")
-                    print(combined_data_for_ai[:1000] + "...") # 너무 길지 않게 일부만 출력
-                    print("="*50 + "\n")
-
-                    # [D] AI 보고서 생성 지침 (KRX 데이터 해석 능력 강화)
-                    council_instruction = data.get("council_prompt", "전문 금융 애널리스트")
-                    # 🎯 1. 분석 지침 강화 (기존 유지)
-                    analysis_guideline = (
-                        "### [ 자료 분석 지침 ]\n" 
-                        "당신은 데이터 기반의 퀀트 애널리스트처럼 행동해야 합니다. 감정적 해석을 배제하고 아래의 순서대로 데이터를 해석하여 결론을 도출하세요.\n\n"
-                        "1.  **시장 방향성 확인**: `KRX 시장 지표 요약`에서 코스피/코스닥 지수 등락을 보고 시장의 전반적인 방향(상승/하락/보합)을 먼저 정의합니다.\n"
-                        "2.  **주도 주체 식별**: `투자자 수급` 데이터에서 외국인과 기관 중 누가 시장을 주도했는지(순매수 규모)를 파악합니다.\n"
-                        "3.  **주도 섹터 특정**: `수급 상위 종목` 리스트에서 주도 주체(2번)가 집중적으로 매수한 종목들을 확인하여 '오늘의 주도 섹터'를 특정합니다. (예: 반도체, 자동차 등)\n"
-                        "4.  **섹터 강도 교차검증**: `주요 산업별 지수 현황`에서 3번에서 특정한 섹터의 지수가 실제로 상승했는지 교차 검증하여 분석의 신뢰도를 높입니다.\n"
-                        "5.  **뉴스 연계 해석**: 위 1~4번 과정으로 도출된 '데이터 기반 결론'(예: 외국인이 반도체 섹터를 강하게 매수하며 지수 상승을 견인)에 대한 이유나 배경을 `최근 주요 뉴스`에서 찾아내어 설명을 보강합니다. 뉴스는 데이터 분석을 뒷받침하는 근거로만 활용하세요.\n"
-                    )
-
-                    # 🎯 2. [추가] 보고서 작성 형식 정의 (이 부분이 누락되어 에러가 발생함)
-                    structure_instruction = (
-                        "### [ 보고서 작성 형식 ]\n"
-                        "각 항목은 아래의 구조를 반드시 엄수하여 작성하라:\n"
-                        "1. 시황 브리핑 / 2. 주요 뉴스 및 오피니언 / 3. 거시경제 분석(수급 지표 포함) / "
-                        "4. 자산별 분석 / 5. 산업별 분석 / 6. 주력/미래 산업 전망 / "
-                        "7. 리스크 분석 / 8. 포트폴리오 및 전략(%) / 9. 수치 기록"
-                    )
-                    full_instruction = (
-                        f"당신은 {council_instruction}이며, 지금부터 'KRX 데이터 분석 방법론'을 철저히 준수해야 합니다.\n"
-                        f"현재 시각: {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                        f"{analysis_guideline}\n\n"
-                        f"--- [ 과거 분석 기록 (참고용) ] ---\n{historical_context}\n\n"
-                        f"--- [ 최종 지시 ] ---\n"
-                        f"이제 제공될 데이터(KRX 원천 데이터, 최신 뉴스)를 바탕으로, 위 방법론과 과거 기록을 참고하여 아래 형식에 맞춰 투자 전략 보고서를 작성하세요.\n"
-                        f"{structure_instruction}"
-                    )
-                    
-                    # 리포트 생성 호출
-                    report = get_ai_summary(
-                        title=f"{date.today()} {r_type.upper()} 보고서", 
-                        content=combined_data_for_ai, 
-                        system_instruction=full_instruction, 
-                        role="analyst"
-                    )
-                    
-                    save_report_to_file(report, r_type)
-                    st.session_state.last_report_content = report
-                    st.rerun()
+                    try:
+                        # 🚀 common.py의 통합 리포트 생성 함수 호출
+                        report = generate_market_report(r_type, data)
+                        
+                        save_report_to_file(report, r_type)
+                        st.session_state.last_report_content = report
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"보고서 생성 실패: {e}")
 
     # 3. 결과 출력 및 대화창 (하단 공통)
     if st.session_state.last_report_content:
@@ -727,7 +875,7 @@ elif st.session_state.active_menu == "AI":
                 st.markdown(message["content"])
 
 # 실시간 채팅 입력
-        if chat_input := st.chat_input("보고서 내용에 대해 질문하세요."):
+        if chat_input := st.chat_input("보고서 내용이나 현재 지표에 대해 질문하세요."):
             st.session_state.report_chat_history.append({"role": "user", "content": chat_input})
             
             # 1. 현재 시간 및 요일 정보 생성
@@ -735,10 +883,21 @@ elif st.session_state.active_menu == "AI":
             days = ['월', '화', '수', '목', '금', '토', '일']
             current_time_info = f"{now.strftime('%Y-%m-%d %H:%M:%S')} ({days[now.weekday()]}요일)"
             
+            # 실시간 DB 지표 주입
+            all_metrics_text = ""
+            for sym in ALL_SYMBOLS:
+                m_data, p_hist, _, _ = get_metric_data(sym)
+                if m_data and 'price' in m_data:
+                    curr = m_data['price']
+                    prev = p_hist[0] if p_hist else curr
+                    diff = ((curr - prev) / prev * 100) if prev != 0 else 0
+                    all_metrics_text += f"- {display_names.get(sym, sym)}: {curr:,.2f} ({diff:+.2f}%)\n"
+            
             # 2. 페르소나 및 시간 정보가 포함된 시스템 컨텍스트
             chat_context = (
                 f"당신은 전문 금융 애널리스트입니다.\n"
-                f"🕒 [현재 시각]: {current_time_info}\n"                
+                f"🕒 [현재 시각]: {current_time_info}\n"
+                f"📊 [실시간 지표]:\n{all_metrics_text}\n"
                 f"📝 [보고서 본문]:\n{st.session_state.last_report_content}\n\n"
                 f"질문에 답할 때 반드시 현재 시각(휴장 여부 등)을 고려하여 답변하세요."
             )
