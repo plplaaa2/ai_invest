@@ -183,6 +183,29 @@ def save_data(data):
         # 한글 깨짐 방지 및 가독성을 위해 옵션을 추가합니다.
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+# 🎯 [NEW] 대시보드 렌더링 헬퍼 함수
+def render_metric_grid(data_dict, keys, cols=4):
+    """주어진 키 리스트에 해당하는 데이터를 그리드 형태로 출력합니다."""
+    columns = st.columns(cols)
+    for i, key in enumerate(keys):
+        col = columns[i % cols]
+        if key in data_dict:
+            item = data_dict[key]
+            # common.py에서 미리 포맷팅한 문자열이 있으면 사용
+            val = item.get('val_str', f"{item.get('value', 0)}")
+            delta = item.get('delta_str', f"{item.get('diff', 0)}")
+            # 이름 오버라이딩 (필요 시)
+            label = item.get('name', key)
+            col.metric(label=label, value=val, delta=delta)
+        else:
+            col.metric(label=key, value="-", delta=None)
+
+# 🎯 [NEW] 대시보드 카테고리 정의
+CAT_INDICES = ["KOSPI", "KOSDAQ", "Dow Jones", "S&P500", "Nasdaq", "VIX"]
+CAT_FX_CMD = ["USD/KRW", "USD/JPY", "WTI", "Gold", "Bitcoin"]
+CAT_RATES = ["KR_3Y", "KR_10Y", "US2Y", "US10Y"]
+CAT_MACRO_1 = ["RRP", "TGA", "Reserves", "M2"]
+CAT_MACRO_2 = ["CPI", "Unemployment", "FedRate"]
 
 # --- 3. UI 및 CSS 설정 ---
 st.set_page_config(page_title="AI Analyst", layout="wide")
@@ -312,6 +335,51 @@ if st.session_state.active_menu == "뉴스":
     # ---------------------------------------
     t_col1.subheader(f"📡 {current_f_name}")
     
+    # 🎯 [NEW] 5단 탭 구성 종합 대시보드
+    try:
+        # 1. 데이터 통합 로드
+        krx_data = get_krx_summary_raw()
+        global_data = get_global_financials_raw()
+        
+        # FRED 데이터는 리스트로 오므로 딕셔너리로 변환
+        fed_list = get_fed_liquidity_raw()
+        fed_data = {item['name']: item for item in fed_list}
+        
+        # 모든 데이터를 하나의 딕셔너리로 병합
+        all_metrics = {**krx_data, **global_data, **fed_data}
+        
+        # 2. 탭 UI 구성
+        st.markdown("##### 📊 주요 시장 지표 요약")
+        t1, t2, t3, t4, t5 = st.tabs([
+            "🏛️ 주요 지수", "🌍 환율/원자재", "🏦 금리", "🏦 연준 유동성", "🛒 물가/고용"
+        ])
+
+        # ️ [t1] 주요 지수 탭
+        with t1:
+            render_metric_grid(all_metrics, CAT_INDICES, 6)
+
+        # 🌍 [t2] 환율/원자재 탭
+        with t2:
+            render_metric_grid(all_metrics, CAT_FX_CMD, 5)
+
+        # 🏦 [t3] 금리/수급 탭
+        with t3:
+            # 금리 및 투자자별 수급 표시
+            render_metric_grid(all_metrics, CAT_RATES, 4)
+
+        # 🏛️ [t4] 연준 유동성 탭
+        with t4:
+            render_metric_grid(all_metrics, CAT_MACRO_1, 4)
+
+        # 🛒 [t5] 물가/고용 탭
+        with t5:
+            render_metric_grid(all_metrics, CAT_MACRO_2, 3)
+            
+        st.divider()
+        
+    except Exception as e:
+        st.error(f"대시보드 로드 중 오류 발생: {e}")
+
     # 버튼을 우측 끝에 배치하여 사이드바 열기 유도
     btn_text = "📂 RSS 닫기" if st.session_state.show_rss_sidebar else "📂 RSS 관리"
     if t_col2.button(btn_text, width='stretch', type="secondary"):
