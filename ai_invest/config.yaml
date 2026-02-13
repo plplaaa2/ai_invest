@@ -1,6 +1,6 @@
 name: "AI Invest Lite Add-on"
 description: "개별 RSS 필터링 및 데스크탑 AI 연동 분석기"
-version: "2.4"
+version: "3.0"
 url: "https://github.com/plplaaa2/ai_invest"
 slug: "ai_invest_lite"
 arch:

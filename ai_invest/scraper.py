@@ -177,6 +177,16 @@ if __name__ == "__main__":
             if time_since_last >= update_interval_sec:
                 print(f"📡 [{now_kst.strftime('%H:%M:%S')}] 뉴스 수집 엔진 가동 (주기: {update_interval_min}분)")
                 
+                # 🎯 [NEW] 시장 데이터(KRX, Global, Fed) 자동 수집 및 캐싱
+                # UI에서 설정한 간격에 맞춰 백그라운드에서 데이터를 갱신해둡니다.
+                print(f"📊 [{now_kst.strftime('%H:%M:%S')}] 시장 데이터 자동 갱신 점검 (KRX/Global/Fed)...")
+                try:
+                    get_krx_summary_raw(ignore_cache=True)       # KRX (pykrx) - 강제 갱신
+                    get_global_financials_raw(ignore_cache=True) # Global (yfinance) - 강제 갱신
+                    get_fed_liquidity_raw()     # Fed (FRED)
+                except Exception as e:
+                    print(f"⚠️ 시장 데이터 자동 수집 중 오류: {e}")
+
                 feeds = current_config.get("feeds", [])
                 g_inc = [k.strip().lower() for k in current_config.get('global_include', "").split(",") if k.strip()]
                 g_exc = [k.strip().lower() for k in current_config.get('global_exclude', "").split(",") if k.strip()]

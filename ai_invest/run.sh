@@ -9,7 +9,7 @@ echo "📦 라이브러리 상태를 점검합니다..."
 python3 -c "import fpdf, pykrx, pandas, yfinance" 2>/dev/null
 if [ $? -ne 0 ]; then
     echo "⚠️ 필수 라이브als러리가 누락되었습니다. 설치를 시작합니다..."
-    pip install --no-cache-dir fpdf2 pykrx pandas yfinance
+    pip install --no-cache-dir --upgrade pykrx pandas yfinance fpdf2
     echo "✅ 라이브러리 설치 완료"
 else
     echo "✅ 모든 라이브러리가 이미 설치되어 있습니다."

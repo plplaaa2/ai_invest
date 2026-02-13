@@ -5,6 +5,8 @@ import re
 import requests
 import time
 import math
+import io
+import pandas as pd
 import feedparser
 from datetime import datetime, timedelta, date, timezone
 from bs4 import BeautifulSoup
@@ -142,33 +144,181 @@ def load_historical_contexts():
             
     return context_text
     
-def get_market_summary():
-    """Pykrx를 활용해 KOSPI/KOSDAQ 지수를 가져옵니다."""
-    summary = ""
+def get_krx_summary_raw(ignore_cache=False):
+    """KOSPI/KOSDAQ 지수 및 KOSPI 3대 주체(개인/외인/기관) 종합 분석"""
+    results = {}
+    cache_dir = os.path.join(BASE_PATH, "cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_path = os.path.join(cache_dir, "krx_summary_v2.json")
+    
+    # 🎯 캐시 처리 (10분)
+    if not ignore_cache and os.path.exists(cache_path):
+        try:
+            if time.time() - os.path.getmtime(cache_path) < 600:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except: pass
+
+    try:
+        from pykrx import stock
+        from pykrx import bond
+        now = get_now_kst()
+        
+        # 🎯 한국 장 시간(09:00) 전이면 어제 날짜를 기준일로 설정
+        if now.hour < 9:
+            target_date = (now - timedelta(days=1)).strftime("%Y%m%d")
+        else:
+            target_date = now.strftime("%Y%m%d")
+            
+        # 휴일 등을 고려하여 넉넉하게 14일 전부터 조회
+        start_dt = (now - timedelta(days=14)).strftime("%Y%m%d")
+        
+        # 1. 지수 데이터 (KOSPI/KOSDAQ)
+        for code, name in [("1001", "KOSPI"), ("2001", "KOSDAQ")]:
+            df = stock.get_index_ohlcv(start_dt, target_date, code)
+            if not df.empty:
+                last = df.iloc[-1]
+                price = float(last['종가'])
+                pct = float(last['등락률']) if '등락률' in df.columns else 0.0
+                
+                # 등락폭 계산 (종가와 등락률 역산)
+                prev = price / (1 + (pct / 100))
+                diff = price - prev
+                
+                results[name] = {
+                    "price": price, "pct": pct,
+                    "amount": float(last['거래대금']) / 100_000_000,
+                    "date": last.name.strftime("%m-%d"),
+                    # 대시보드 호환용 키 추가
+                    "value": price,
+                    "val_str": f"{price:,.2f}",
+                    "delta_str": f"{diff:+.2f} ({pct:+.2f}%)"
+                }
+
+        # 2. KOSPI/KOSDAQ 주체별 거래대금 및 Top 10 종목
+        if "KOSPI" in results:
+            actual_date = df.index[-1].strftime("%Y%m%d") # 실제 데이터 날짜
+            
+            for mkt in ["KOSPI", "KOSDAQ"]:
+                try:
+                    # (A) 거래대금 합계
+                    df_inv = stock.get_market_trading_value_by_date(actual_date, actual_date, mkt)
+                    if not df_inv.empty:
+                        row = df_inv.iloc[-1]
+                        for kor, eng in [('개인', 'Individual'), ('외국인합계', 'Foreigner'), ('기관합계', 'Institution')]:
+                            val_bill = float(row[kor]) / 100_000_000
+                            results[f"{mkt}_{eng}"] = {
+                                "value": val_bill,
+                                "val_str": f"{val_bill/10000:,.2f}조" if abs(val_bill) >= 10000 else f"{val_bill:,.0f}억"
+                            }
+
+                    # (B) 주체별 순매수 Top 10 종목
+                    for kor, eng in [("개인", "Top_Individual"), ("외국인", "Top_Foreigner"), ("기관합계", "Top_Institution")]:
+                        df_top = stock.get_market_net_purchases_of_equities(actual_date, actual_date, mkt, kor)
+                        if not df_top.empty:
+                            items = [f"{r['종목명']}({float(r['종목별순매수금액'])/100_000_000:,.0f}억)" for _, r in df_top.head(10).iterrows()]
+                            results[f"{mkt}_{eng}"] = ", ".join(items)
+
+                    # (C) 공매도 거래량
+                    df_short = stock.get_shorting_investor_volume_by_date(actual_date, actual_date, mkt)
+                    if not df_short.empty:
+                        s_row = df_short.iloc[-1]
+                        results[f'{mkt}_Short'] = {"total": f"{s_row['합계']:,.0f}주", "for": f"{s_row['외국인']:,.0f}주"}
+                except: pass
+
+            # (D) 채권 금리
+            try:
+                df_bond = bond.get_otc_treasury_yields(actual_date)
+                if not df_bond.empty:
+                    for label, key in [("KR_3Y", "국고채 3년"), ("KR_10Y", "국고채 10년")]:
+                        if key in df_bond.index:
+                            val = float(df_bond.loc[key, "수익률"])
+                            diff = float(df_bond.loc[key, "대비"])
+                            results[label] = {
+                                "value": val, "diff": diff,
+                                "val_str": f"{val:.2f}%", "delta_str": f"{diff:+.2f}"
+                            }
+            except: pass
+
+        # 캐시 저장 후 반환
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False)
+        return results
+
+    except Exception as e:
+        print(f"⚠️ 데이터 수집 실패: {e}")
+        return results
+    
+def get_krx_market_data(r_type="daily"):
+    """(통합) 지수, 수급, 금리 요약 보고서 (기간별 맞춤)"""
+    # 🎯 보고서 유형별 기간 설정
+    if r_type == 'daily':
+        fetch_days = 7      # 데이터 확보: 1주일
+        comp_idx = -2       # 변화 기준: 전일 대비 (Daily Change)
+        period_name = "일간(1D)"
+    elif r_type == 'weekly':
+        fetch_days = 14     # 데이터 확보: 2주일
+        comp_idx = -6       # 변화 기준: 1주 전 대비 (Weekly Change, approx 5 trading days)
+        period_name = "주간(1W)"
+    else: # monthly
+        fetch_days = 60     # 데이터 확보: 2달
+        comp_idx = -21      # 변화 기준: 1달 전 대비 (Monthly Change, approx 20 trading days)
+        period_name = "월간(1M)"
+
+    data = get_krx_summary_raw() # 최신 수급/금리용 (Snapshot)
+    summary = f"### [ KRX 시장 지표 ({period_name} 변동) ]\n"
+
     try:
         from pykrx import stock
         now = get_now_kst()
-        # 최근 5일 조회 (주말/휴일 대비)
-        start_dt = (now - timedelta(days=5)).strftime("%Y%m%d")
-        end_dt = now.strftime("%Y%m%d")
-        
-        # 1001: KOSPI, 2001: KOSDAQ
-        df_k = stock.get_index_ohlcv(start_dt, end_dt, "1001")
-        df_kq = stock.get_index_ohlcv(start_dt, end_dt, "2001")
-        
-        if not df_k.empty and not df_kq.empty:
-            last_k = df_k.iloc[-1]
-            last_kq = df_kq.iloc[-1]
-            date_str = last_k.name.strftime("%Y-%m-%d")
-            
-            summary = (
-                f"### [ 📉 국내 증시 요약 ({date_str}) ]\n"
-                f"- KOSPI: {last_k['종가']:,.2f} ({last_k['등락률']:+.2f}%)\n"
-                f"- KOSDAQ: {last_kq['종가']:,.2f} ({last_kq['등락률']:+.2f}%)\n\n"
-            )
+        target_date = now.strftime("%Y%m%d")
+        if now.hour < 9: target_date = (now - timedelta(days=1)).strftime("%Y%m%d")
+        start_dt = (now - timedelta(days=fetch_days)).strftime("%Y%m%d")
+
+        for code, name in [("1001", "KOSPI"), ("2001", "KOSDAQ")]:
+            df = stock.get_index_ohlcv(start_dt, target_date, code)
+            if not df.empty and len(df) >= abs(comp_idx):
+                curr = float(df.iloc[-1]['종가'])
+                # comp_idx가 범위 내에 있으면 사용, 아니면 가장 첫 데이터 사용
+                prev_idx = comp_idx if len(df) >= abs(comp_idx) else 0
+                prev = float(df.iloc[prev_idx]['종가'])
+                
+                diff = curr - prev
+                pct = (diff / prev) * 100
+                summary += f"- {name}: {curr:,.2f} ({pct:+.2f}% / {period_name} 변동)\n"
     except Exception as e:
-        print(f"⚠️ Pykrx 데이터 조회 실패: {e}")
+        summary += f"⚠️ 지수 데이터 계산 중 오류: {e}\n"
+
+    summary += f"- KOSPI 수급(순매수): 개인 {data.get('KOSPI_Individual',{}).get('val_str','0억')}, 외국인 {data.get('KOSPI_Foreigner',{}).get('val_str','0억')}, 기관 {data.get('KOSPI_Institution',{}).get('val_str','0억')}\n"
+    summary += f"- KOSDAQ 수급(순매수): 개인 {data.get('KOSDAQ_Individual',{}).get('val_str','0억')}, 외국인 {data.get('KOSDAQ_Foreigner',{}).get('val_str','0억')}, 기관 {data.get('KOSDAQ_Institution',{}).get('val_str','0억')}\n"
+    k3 = data.get('KR_3Y', {}).get('val_str', 'N/A')
+    k10 = data.get('KR_10Y', {}).get('val_str', 'N/A')
+    summary += f"- 국고채 금리: 3년물 {k3} | 10년물 {k10}\n"
     return summary
+
+def get_krx_top_investors():
+    """(통합) 3대 주체별 순매수 상위 및 공매도 보고서"""
+    data = get_krx_summary_raw()
+    if not data: return ""
+    
+    report = "### [ KOSPI 주체별 순매수 Top 10 ]\n"
+    report += f"- 👤 개인: {data.get('KOSPI_Top_Individual', '데이터 없음')}\n"
+    report += f"- 🌍 외인: {data.get('KOSPI_Top_Foreigner', '데이터 없음')}\n"
+    report += f"- 🏢 기관: {data.get('KOSPI_Top_Institution', '데이터 없음')}\n"
+    
+    s_total = data.get('KOSPI_Short', {}).get('total', 'N/A')
+    s_for = data.get('KOSPI_Short', {}).get('for', 'N/A')
+    report += f"📊 공매도: 총 {s_total} (외인 {s_for})\n"
+
+    report += "\n### [ KOSDAQ 주체별 순매수 Top 10 ]\n"
+    report += f"- 👤 개인: {data.get('KOSDAQ_Top_Individual', '데이터 없음')}\n"
+    report += f"- 🌍 외인: {data.get('KOSDAQ_Top_Foreigner', '데이터 없음')}\n"
+    report += f"- 🏢 기관: {data.get('KOSDAQ_Top_Institution', '데이터 없음')}\n"
+    
+    s_total_kq = data.get('KOSDAQ_Short', {}).get('total', 'N/A')
+    s_for_kq = data.get('KOSDAQ_Short', {}).get('for', 'N/A')
+    report += f"📊 공매도: 총 {s_total_kq} (외인 {s_for_kq})\n"
+    return report
 
 def load_data():
     """서비스 설정(RSS, AI 모델 등)을 로드하고 미존재 시 기본 설정을 생성합니다."""
@@ -233,95 +383,25 @@ def load_data():
 # 공통 데이터 객체 (모든 모듈에서 공유)
 data = load_data()
 
-def get_krx_market_indicators():
-    """코스피/코스닥 지수 및 수급현황 요약 (로그 강화)"""
-    try:
-        target_date = get_latest_trading_date()
-        print(f"🔍 [지표 수집] 대상 날짜: {target_date}")
-        summary = f"### [ KRX 시장 지표 요약 ({target_date}) ]\n"
-
-        for m_name, m_code in [("KOSPI", "1001"), ("KOSDAQ", "2001")]:
-            df = stock.get_index_ohlcv_by_date(target_date, target_date, m_code)
-            if not df.empty:
-                row = df.iloc[0]
-                amount_bill = row['거래대금'] / 100_000_000
-                summary += f"- {m_name}: {row['종가']:,.2f} (거래량: {row['거래량']:,.0f}, 거래대금: {amount_bill:,.0f}억)\n"
-                print(f"   📊 {m_name} 로드 완료: {row['종가']:,.2f}")
-
-        df_inv = stock.get_market_net_purchase_of_equities_by_ticker(target_date, target_date, "ALL")
-        foreign_bill = df_inv['외국인'].sum() / 100_000_000
-        inst_bill = df_inv['기관합계'].sum() / 100_000_000
-        summary += f"- 투자자 수급: 외국인 {foreign_bill:,.0f}억, 기관 {inst_bill:,.0f}억 (순매수 기준)\n"
-        print(f"   💰 수급 데이터 합계: 외인({foreign_bill:,.0f}억), 기관({inst_bill:,.0f}억)", flush=True)
-        
-        return summary
-    except Exception as e:
-        print(f"❌ [에러] 지수 요약 로드 실패: {e}")
-        return "⚠️ KRX 지수 요약 로드 실패"
-
-def get_krx_top_investors():
-    """외국인/기관 순매수 상위 10개 종목 (로그 강화)"""
-    try:
-        target_date = get_latest_trading_date()
-        df = stock.get_market_net_purchase_of_equities_by_ticker(target_date, target_date, "ALL")
-        
-        def get_top_list(data, col):
-            top_df = data.sort_values(by=col, ascending=False).head(10)
-            items = []
-            for ticker, row in top_df.iterrows():
-                name = stock.get_market_ticker_name(ticker)
-                val_bill = row[col] / 100_000_000
-                items.append(f"{name}({val_bill:,.0f}억)")
-            return ", ".join(items)
-
-        f_top = get_top_list(df, '외국인')
-        i_top = get_top_list(df, '기관합계')
-        
-        print(f"🔝 [순매수 Top 10] 외인: {f_top[:50]}...", flush=True)# 로그가 너무 길지 않게 일부만 출력
-        print(f"🔝 [순매수 Top 10] 기관: {i_top[:50]}...", flush=True)
-        
-        report = "### [ 수급 상위 종목 (Top 10) ]\n"
-        report += f"- 외국인 매수: {f_top}\n"
-        report += f"- 기관 매수: {i_top}\n"
-        return report
-    except Exception as e:
-        print(f"❌ [에러] 수급 종목 로드 실패: {e}")
-        return "⚠️ 수급 종목 로드 실패"
-
-def get_krx_sector_indices():
-    """주요 산업별 지수 현황 (로그 강화)"""
-    try:
-        target_date = get_latest_trading_date()
-        indices = stock.get_index_ticker_list(target_date, market="KRX")
-        print(f"🏭 [산업 섹터] 전체 {len(indices)}개 지수 중 주요 항목 필터링 중...")
-        
-        report = "### [ 주요 산업별 지수 현황 ]\n"
-        count = 0
-        for ticker in indices:
-            name = stock.get_index_ticker_name(ticker)
-            if any(kw in name for kw in ['반도체', 'IT', '금융', '에너지', '바이오', '자동차']):
-                df = stock.get_index_ohlcv_by_date(target_date, target_date, ticker)
-                if not df.empty:
-                    val = df.iloc[0]['종가']
-                    report += f"- {name}: {val:,.2f}\n"
-                    print(f"   ✅ 섹터 확인: {name} ({val:,.2f})", flush=True)
-                    count += 1
-            if count >= 8: break
-        return report
-    except Exception as e:
-        print(f"❌ [에러] 산업 지수 로드 실패: {e}")
-        return "⚠️ 산업 지수 로드 실패"
 
 def get_global_market_data(r_type="daily"):
     """yfinance를 통해 글로벌 시장 데이터를 수집합니다."""
     if not yf: return "⚠️ yfinance 모듈이 설치되지 않았습니다."
 
     end_dt = get_now_kst()
-    if r_type == 'daily': days = 7
-    elif r_type == 'weekly': days = 30
-    else: days = 60
     
-    start_dt = end_dt - timedelta(days=days)
+    # 🎯 보고서 유형별 기간 및 비교 시점 설정
+    if r_type == 'daily': 
+        days = 7
+        comp_idx = -2 # 전일 대비
+    elif r_type == 'weekly': 
+        days = 14
+        comp_idx = -6 # 1주 전 대비 (약 5거래일)
+    else: 
+        days = 60
+        comp_idx = -21 # 1달 전 대비 (약 20거래일)
+    
+    start_dt = end_dt - timedelta(days=days + 5) # 여유 있게 조회
     
     tickers = {
         "🇺🇸 미국 3대 지수 & VIX": {
@@ -342,7 +422,7 @@ def get_global_market_data(r_type="daily"):
     }
     
     all_symbols = [s for cat in tickers.values() for s in cat.keys()]
-    report = f"### [ 🌍 글로벌 시장 데이터 ({days}일 변동) ]\n"
+    report = f"### [ 🌍 글로벌 시장 데이터 ({r_type.upper()} 기준 변동) ]\n"
     
     try:
         df = yf.download(all_symbols, start=start_dt.strftime('%Y-%m-%d'), end=end_dt.strftime('%Y-%m-%d'), progress=False)['Close']
@@ -352,15 +432,172 @@ def get_global_market_data(r_type="daily"):
                 try:
                     if sym in df.columns:
                         series = df[sym].dropna()
-                        if series.empty: continue
-                        curr, start = series.iloc[-1], series.iloc[0]
+                        if len(series) < 2: continue
+                        
+                        curr = float(series.iloc[-1])
+                        # 비교 대상 인덱스 설정 (데이터 부족 시 첫 데이터 사용)
+                        target_idx = comp_idx if len(series) >= abs(comp_idx) else 0
+                        prev = float(series.iloc[target_idx])
+                        
+                        chg_pct = ((curr - prev) / prev) * 100
                         chg_pct = ((curr - start) / start) * 100
-                        report += f"- **{name}**: {curr:,.2f} ({chg_pct:+.2f}%, 범위: {series.min():,.2f}~{series.max():,.2f})\n"
+                        report += f"- **{name}**: {curr:,.2f} ({chg_pct:+.2f}%, {days}일 범위: {series.min():,.2f}~{series.max():,.2f})\n"
                 except: continue
             report += "\n"
         return report
     except Exception as e:
         return f"⚠️ 글로벌 데이터 수집 실패: {e}"
+
+def get_global_financials_raw(ignore_cache=False):
+    """대시보드용 글로벌 지수, 환율, 원자재, 금리 데이터를 통합 수집합니다."""
+    print("🔍 [DEBUG] get_global_financials_raw 진입")
+    if not yf: return {}
+    
+    # 🎯 [NEW] 캐싱 설정 (10분)
+    cache_dir = os.path.join(BASE_PATH, "cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_path = os.path.join(cache_dir, "global_financials.json")
+    
+    if not ignore_cache and os.path.exists(cache_path):
+        print("🔍 [DEBUG] get_global_financials_raw 캐시 사용")
+        try:
+            if time.time() - os.path.getmtime(cache_path) < 600:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except: pass
+    
+    # 주요 티커 매핑
+    tickers = {
+        "S&P500": "^GSPC", "Dow Jones": "^DJI", "Nasdaq": "^IXIC", "VIX": "^VIX",
+        "USD/KRW": "KRW=X", "USD/JPY": "JPY=X", 
+        "WTI": "CL=F", "Gold": "GC=F", "Bitcoin": "BTC-USD",
+        "US10Y": "^TNX", "US2Y": "^IRX" # 미국채 10년, 2년
+    }
+    
+    results = {}
+    try:
+        print("🔍 [DEBUG] get_global_financials_raw yfinance 데이터 다운로드 시작")
+        end_dt = get_now_kst()
+        start_dt = end_dt - timedelta(days=7)
+        df = yf.download(list(tickers.values()), start=start_dt.strftime('%Y-%m-%d'), end=end_dt.strftime('%Y-%m-%d'), progress=False)['Close']
+        print("🔍 [DEBUG] get_global_financials_raw yfinance 데이터 다운로드 완료")
+
+        for name, sym in tickers.items():
+            if sym in df.columns:
+                series = df[sym].dropna()
+                if len(series) >= 2:
+                    curr = float(series.iloc[-1])
+                    prev = float(series.iloc[-2])
+                    diff = curr - prev
+                    print(f"🔍 [DEBUG] get_global_financials_raw {name} 가격: {curr}, 변화: {diff}")
+                    pct = (diff / prev) * 100
+                    results[name] = {
+                        "price": curr, "diff": diff, "pct": pct,
+                        "val_str": f"{curr:,.2f}",
+                        "delta_str": f"{diff:+.2f} ({pct:+.2f}%)"
+                    }
+        
+        # 캐시 저장
+        print("🔍 [DEBUG] get_global_financials_raw 캐시 저장")
+        if results:
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(results, f, ensure_ascii=False)
+    except: pass
+    print("🔍 [DEBUG] get_global_financials_raw 완료")
+    return results
+
+def get_fed_liquidity_raw():
+    """FRED 데이터 원본 리스트를 반환합니다. (Dashboard용)"""
+    print("🔍 [DEBUG] get_fed_liquidity_raw 진입")
+    # 🎯 [NEW] 캐싱 설정 (24시간 - 하루 1회)
+    cache_dir = os.path.join(BASE_PATH, "cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    print("🔍 [DEBUG] get_fed_liquidity_raw 캐시 경로:", cache_dir)
+    cache_path = os.path.join(cache_dir, "fed_liquidity.json")
+    
+    if os.path.exists(cache_path):
+        try:
+            if time.time() - os.path.getmtime(cache_path) < 86400: # 24시간
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except: pass
+
+    results = []
+    
+    # (Series ID, 이름, 단위변환계수, 단위문자열)
+    indicators = [
+        ("RRPONTSYD", "RRP", 1.0, "B$"),
+        ("WRESBAL", "Reserves", 1.0, "B$"),
+        ("WTREGEN", "TGA", 1.0, "B$"),
+        ("M2SL", "M2", 1.0, "B$"),
+        ("CPIAUCSL", "CPI", 1.0, "Idx"),      # 소비자물가지수
+        ("UNRATE", "Unemployment", 1.0, "%"), # 실업률
+        ("FEDFUNDS", "FedRate", 1.0, "%")     # 기준금리
+    ]
+    
+    base_url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={}"
+    try:
+        print("🔍 [DEBUG] get_fed_liquidity_raw FRED 데이터 다운로드 시작")
+        for code, name, scale, unit in indicators:
+            try:
+                # FRED는 별도 API 키 없이 CSV 직접 다운로드 가능
+                res = requests.get(base_url.format(code), timeout=5)
+                if res.status_code == 200:
+                    # 데이터프레임 변환
+                    df = pd.read_csv(io.StringIO(res.text), index_col=0, parse_dates=True)
+                    if not df.empty:
+                        series = df.iloc[:, 0].dropna()
+                        if series.empty: continue
+                        
+                        curr_val = float(series.iloc[-1]) * scale
+                        curr_date = series.index[-1].strftime("%Y-%m-%d")
+                        
+                        # 🎯 1년 전 데이터 계산 (약 252 거래일 or 12개월)
+                        idx_1y = -252 if len(series) > 252 else (-12 if len(series) > 12 else 0)
+                        val_1y = float(series.iloc[idx_1y]) * scale
+                        diff_1y = curr_val - val_1y
+                        pct_1y = (diff_1y / val_1y) * 100 if val_1y != 0 else 0.0
+                        
+                        # 전조(Previous) 대비 증감
+                        diff_str = "-"
+                        if len(series) > 1:
+                            prev_val = float(series.iloc[-2]) * scale
+                            diff = curr_val - prev_val
+                            diff_str = f"{diff:+.1f}"
+                        
+                        # 단위에 따른 포맷팅 미세 조정
+                        fmt = ",.2f" if unit in ["%", "Idx"] else ",.1f"
+                        results.append({
+                            "name": name, "value": curr_val, "diff": diff, 
+                            "diff_str": diff_str, "date": curr_date,
+                            "val_str": f"{curr_val:{fmt}}{unit}",
+                            "delta_str": f"{diff_str} (전조)",
+                            "diff_1y": diff_1y,
+                            "pct_1y": pct_1y
+                        })
+                print(f"🔍 [DEBUG] get_fed_liquidity_raw {name} 로드 완료")
+            except Exception as e:
+                continue
+                
+        # 캐시 저장
+        if results:
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(results, f, ensure_ascii=False)
+        print("🔍 [DEBUG] get_fed_liquidity_raw 캐시 저장")
+    except: pass
+    
+    return results
+
+def get_fed_liquidity_data():
+    """FRED 데이터를 보고서 문자열 형태로 반환합니다."""
+    raw_data = get_fed_liquidity_raw()
+    summary = "### [ 🏦 연준(Fed) 거시/유동성 지표 ]\n"
+    try:
+        for item in raw_data:
+            summary += f"- **{item['name']}**: {item['val_str']} (전조: {item['diff_str']} | 1년 변동: {item['pct_1y']:+.1f}%)\n"
+        return summary + "\n"
+    except Exception as e:
+        return f"⚠️ 연준 데이터 수집 중 에러: {e}\n"
 
 def get_past_reports(section, count=1):
     """특정 섹션의 과거 보고서(날짜별 파일)를 최신순으로 가져옵니다."""
@@ -436,12 +673,14 @@ def prepare_report_data(r_type, config_data):
     """보고서 생성을 위한 데이터(KRX 지표 + 뉴스/과거리포트)를 구성합니다."""
     now_kst = get_now_kst()
     global_data = get_global_market_data(r_type)
+    fed_data = get_fed_liquidity_data() # 연준 지표 추가
     
+    # KRX 데이터 공통 수집 (주간/월간 보고서에도 현재 시장 상황 반영)
+    market_summary = get_krx_market_data(r_type)
+
     if r_type == "daily":
         print(f"🔍 [Daily] 데이터 수집 (KRX 지표 & 뉴스 필터링) 시작...")
-        market_summary = get_krx_market_indicators()
         top_purchases = get_krx_top_investors()
-        industry_indices = get_krx_sector_indices()
         
         news_count = config_data.get("report_news_count", 100)
         raw_news_list = []
@@ -468,7 +707,7 @@ def prepare_report_data(r_type, config_data):
                 except: continue
         
         news_ctx = f"### [ 금일 주요 뉴스 {len(raw_news_list)}선 ]\n" + "\n".join([f"- {t}" for t in raw_news_list])
-        return (f"{market_summary}\n{global_data}\n{top_purchases}\n{industry_indices}\n\n{news_ctx}", "일간(Daily)")
+        return (f"{market_summary}\n{global_data}\n{fed_data}\n{top_purchases}\n\n{news_ctx}", "일간(Daily)")
     else:
         # Weekly: 이번 주 일간 보고서 전부 (최대 7일)
         # Monthly: 이번 달 주간 보고서 전부 (최대 5개)
@@ -482,7 +721,7 @@ def prepare_report_data(r_type, config_data):
         if not source_docs:
             source_docs = "⚠️ 분석할 하위 주기 리포트 데이터가 없습니다."
             
-        return f"{source_docs}\n\n{global_data}", label
+        return f"{source_docs}\n\n{market_summary}\n{global_data}\n{fed_data}", label
 
 def generate_invest_report(r_type, input_content, config_data):
     """AI를 호출하여 투자 전략 보고서를 생성합니다."""
