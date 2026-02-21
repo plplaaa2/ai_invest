@@ -3,30 +3,6 @@ import pandas as pd
 from common import *
 from fpdf import FPDF
 
-# app.py 내의 is_filtered 함수를 이 내용으로 교체하세요.
-def is_filtered(title, summary, g_inc, g_exc, l_inc="", l_exc=""):
-    """제목(Title)만을 기준으로 전역/개별 필터를 적용합니다."""
-    # 🎯 1. 대소문자 무시 및 공백 정리 
-    text = title.lower().strip()
-    
-    # 🎯 2. 제외 필터 (Exclude): 제목에 단 하나라도 포함되면 즉시 탈락 
-    exclude_str = f"{g_exc},{l_exc}"
-    exc_tags = [t.strip().lower() for t in exclude_str.split(",") if t.strip()]
-    if any(t in text for t in exc_tags): 
-        return False
-    
-    # 🎯 3. 전역 포함어 (Global Include): 설정된 경우, 제목에 반드시 있어야 통과 
-    g_inc_tags = [t.strip().lower() for t in g_inc.split(",") if t.strip()]
-    if g_inc_tags and not any(t in text for t in g_inc_tags):
-        return False
-        
-    # 🎯 4. 개별(피드) 포함어 (Local Include): 설정된 경우, 제목에 반드시 있어야 통과 
-    l_inc_tags = [t.strip().lower() for t in l_inc.split(",") if t.strip()]
-    if l_inc_tags and not any(t in text for t in l_inc_tags):
-        return False
-    
-    return True # 모든 검사를 통과함
-
 @st.dialog("📊 AI 정밀 분석 리포트")
 def show_analysis_dialog(title, summary_text, pub_dt, role="filter"): 
     with st.spinner("AI가 뉴스를 심층 분석 중입니다..."):
@@ -66,16 +42,6 @@ def show_analysis_dialog(title, summary_text, pub_dt, role="filter"):
         f"🕒 분석 시각: {analysis_time} | "
         f"📊 분석 모드: {'단기 판독' if role == 'filter' else '심층 전략'}"
     )
-
-def check_filters(title, include_str, exclude_str):
-    title = title.lower().strip()
-    if exclude_str:
-        exc_tags = [t.strip().lower() for t in exclude_str.split(",") if t.strip()]
-        if any(t in title for t in exc_tags): return False
-    if include_str:
-        inc_tags = [t.strip().lower() for t in include_str.split(",") if t.strip()]
-        if not any(t in title for t in inc_tags): return False
-    return True
 
 def clean_html(raw_html):
     if not raw_html: return "요약 내용 없음"
@@ -152,10 +118,11 @@ def load_pending_files(range_type, target_feed=None):
                     filter_fail += 1
                     continue
                 
-                if target_feed:
-                    if not check_filters(title, target_feed.get('include', ""), target_feed.get('exclude', "")):
-                        filter_fail += 1
-                        continue
+                # 개별/전역 포함 필터 제거됨, 전역 제외 필터만 검사
+                exc_list = [t.strip().lower() for t in data.get('global_exclude', "").split(",") if t.strip()]
+                if not check_keyword_filter(title, exc_list):
+                    filter_fail += 1
+                    continue
                 
                 news_list.append({
                     "title": title, "link": link, "published": pub_str, 
@@ -203,9 +170,9 @@ def render_metric_grid(data_dict, keys, cols=4):
 # 🎯 [NEW] 대시보드 카테고리 정의
 CAT_INDICES = ["KOSPI", "KOSDAQ", "Dow Jones", "S&P500", "Nasdaq", "VIX"]
 CAT_FX_CMD = ["USD/KRW", "USD/JPY", "WTI", "Gold", "Bitcoin"]
-CAT_RATES = ["KR_3Y", "KR_10Y", "US2Y", "US10Y"]
+CAT_RATES = ["KR_3Y", "KR_10Y", "US2Y", "US10Y", "FedRate", "HighYield"]
 CAT_MACRO_1 = ["RRP", "TGA", "Reserves", "M2"]
-CAT_MACRO_2 = ["CPI", "Unemployment", "FedRate"]
+CAT_MACRO_2 = ["CPI", "GDPNow", "ExpInf", "Unemployment"]
 
 # --- 3. UI 및 CSS 설정 ---
 st.set_page_config(page_title="AI Analyst", layout="wide")
@@ -245,24 +212,72 @@ if st.session_state.active_menu == "설정":
 
     with tab_f:
         st.markdown("#### 📡 뉴스 스트리밍 요약용 모델")
-        f_cfg = data.get("filter_model")
-        # 고유 키: f_url_input
-        f_url = st.text_input("API 서버 주소 (URL)", value=f_cfg.get("url"), help="예: http://192.168.1.2:1234/v1", key="f_url_input")
-        f_name = st.text_input("모델명", value=f_cfg.get("name"), key="f_name_input")
+        f_cfg = data.get("filter_model", {})
+        
+        f_current_url = f_cfg.get("url", "").lower()
+        if "googleapis" in f_current_url:
+            f_provider_idx = 1
+        elif "openai" in f_current_url:
+            f_provider_idx = 0
+        else:
+            f_provider_idx = 2
+
+        f_provider = st.selectbox("API 제공 경로 (Provider)", ["openai", "gemini", "local"], index=f_provider_idx, key="f_provider")
+        
+        if f_provider == "openai":
+            f_default_url = "https://api.openai.com/v1"
+            f_default_name = "gpt-5-mini-2025-08-07"
+            f_disabled = True
+        elif f_provider == "gemini":
+            f_default_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+            f_default_name = "gemini-3-flash-preview"
+            f_disabled = True
+        else:
+            f_default_url = f_cfg.get("url", "")
+            f_default_name = f_cfg.get("name", "")
+            f_disabled = False
+
+        f_url = st.text_input("API 서버 주소 (URL)", value=f_default_url, help="예: http://192.168.1.2:1234/v1", key="f_url_input", disabled=f_disabled)
+        f_name = st.text_input("모델명", value=f_default_name, key="f_name_input", disabled=f_disabled)
         f_prompt = st.text_area("기본 요약 지침", value=f_cfg.get("prompt"), height=100, key="f_prompt_input")
         
         if st.button("💾 판독 모델 설정 저장", width='stretch'):
+            if "filter_model" not in data: data["filter_model"] = {}
             data["filter_model"].update({"url": f_url, "name": f_name, "prompt": f_prompt})
             save_data(data); st.success("✅ 판독 모델 설정 저장 완료!")
 
     with tab_a:
         st.markdown("#### 🏛️ 투자 보고서 생성용 모델")
-        a_cfg = data.get("analyst_model")
-        # 고유 키: a_url_input
-        a_url = st.text_input("API 서버 주소 (URL)", value=a_cfg.get("url"), help="예: http://192.168.1.105:11434/v1", key="a_url_input")
-        a_name = st.text_input("모델명", value=a_cfg.get("name"), key="a_name_input")
+        a_cfg = data.get("analyst_model", {})
+        
+        a_current_url = a_cfg.get("url", "").lower()
+        if "googleapis" in a_current_url:
+            a_provider_idx = 1
+        elif "openai" in a_current_url:
+            a_provider_idx = 0
+        else:
+            a_provider_idx = 2
+
+        a_provider = st.selectbox("API 제공 경로 (Provider)", ["openai", "gemini", "local"], index=a_provider_idx, key="a_provider")
+        
+        if a_provider == "openai":
+            a_default_url = "https://api.openai.com/v1"
+            a_default_name = "gpt-5-mini-2025-08-07"
+            a_disabled = True
+        elif a_provider == "gemini":
+            a_default_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+            a_default_name = "gemini-3-flash-preview"
+            a_disabled = True
+        else:
+            a_default_url = a_cfg.get("url", "")
+            a_default_name = a_cfg.get("name", "")
+            a_disabled = False
+
+        a_url = st.text_input("API 서버 주소 (URL)", value=a_default_url, help="예: http://192.168.1.105:11434/v1", key="a_url_input", disabled=a_disabled)
+        a_name = st.text_input("모델명", value=a_default_name, key="a_name_input", disabled=a_disabled)
         
         if st.button("💾 분석 모델 설정 저장", width='stretch'):
+            if "analyst_model" not in data: data["analyst_model"] = {}
             data["analyst_model"].update({"url": a_url, "name": a_name})
             save_data(data); st.success("✅ 분석 모델 설정 저장 완료!")
 
@@ -271,8 +286,8 @@ if st.session_state.active_menu == "설정":
         col1, col2 = st.columns(2)
         
         # 1. 뉴스 수집 및 보관 설정
-        new_retention = col1.slider("뉴스 파일 보관 기간 (일)", 1, 30, value=data.get("retention_days", 7), key="cfg_retention_days")
-        new_interval = col2.number_input("RSS 수집 주기 (분)", 1, value=data.get("update_interval", 10), key="cfg_update_interval")
+        new_retention = col1.slider("뉴스 파일 보관 기간 (일)", 1, 3, value=min(data.get("retention_days", 3), 3), key="cfg_retention_days")
+        new_interval = col2.number_input("데이터 수집 주기 (분)", 1, value=data.get("update_interval", 10), key="cfg_update_interval")
         
         st.divider()
         
@@ -365,7 +380,7 @@ if st.session_state.active_menu == "뉴스":
         # 🏦 [t3] 금리/수급 탭
         with t3:
             # 금리 및 투자자별 수급 표시
-            render_metric_grid(all_metrics, CAT_RATES, 4)
+            render_metric_grid(all_metrics, CAT_RATES, 6)
 
         # 🏛️ [t4] 연준 유동성 탭
         with t4:
@@ -373,7 +388,7 @@ if st.session_state.active_menu == "뉴스":
 
         # 🛒 [t5] 물가/고용 탭
         with t5:
-            render_metric_grid(all_metrics, CAT_MACRO_2, 3)
+            render_metric_grid(all_metrics, CAT_MACRO_2, 4)
             
         st.divider()
         
@@ -401,10 +416,10 @@ if st.session_state.active_menu == "뉴스":
             try:
                 parsed = feedparser.parse(f_info['url'])
                 for e in parsed.entries:
-                    # 강화된 제목 필터 적용 (버그 수정됨)
-                    if is_filtered(e.title, e.get('summary', ''), 
-                                   data.get("global_include", ""), data.get("global_exclude", ""),
-                                   f_info.get('include', ""), f_info.get('exclude', "")):
+                    # 제목 필터 (전역 제외어만 적용)
+                    g_exc = [k.strip().lower() for k in data.get("global_exclude", "").split(",") if k.strip()]
+
+                    if check_keyword_filter(e.title, g_exc):
                         e['source'] = f_info['name']
                         full_list.append(e)
             except: continue
@@ -518,17 +533,7 @@ if st.session_state.active_menu == "뉴스":
                             ed_diag()
                     
                         # B. 필터 버튼
-                        if col_fi.button("필터", key=f"fi_{i}", width='stretch'):
-                            @st.dialog("키워드 필터", width="small")
-                            def fi_diag(idx=i):
-                                fe = data['feeds'][idx]
-                                inc = st.text_area("포함 키워드", value=fe.get('include', ""))
-                                exc = st.text_area("제외 키워드", value=fe.get('exclude', ""))
-                                if st.button("필터 적용"):
-                                    data['feeds'][idx].update({"include": inc, "exclude": exc})
-                                    save_data(data)
-                                    st.rerun()
-                            fi_diag()
+                        # 개별 필터 기능 삭제됨
                         
                         # C. 삭제 버튼
                         if col_de.button("삭제", key=f"de_{i}", width='stretch'):
@@ -548,16 +553,15 @@ if st.session_state.active_menu == "뉴스":
                     n = st.text_input("피드 이름 (예: 연합뉴스)")
                     u = st.text_input("RSS URL 주소")
                     if st.button("등록 완료"):
-                        data['feeds'].append({"name": n, "url": u, "include": "", "exclude": ""})
+                        data['feeds'].append({"name": n, "url": u})
                         save_data(data); st.rerun()
                 add_diag()
 
             # 전역 필터 설정 구역 (사이드바 안에 포함)
             with st.expander("🌐 전역 필터 설정", expanded=False):
-                g_inc = st.text_area("전역 포함 키워드", value=data.get("global_include", ""), help="쉼표(,)로 구분")
                 g_exc = st.text_area("전역 제외 키워드", value=data.get("global_exclude", ""), help="쉼표(,)로 구분")
                 if st.button("전역 필터 저장", width='stretch'):
-                    data.update({"global_include": g_inc, "global_exclude": g_exc})
+                    data.update({"global_exclude": g_exc})
                     save_data(data); st.toast("전역 필터가 저장되었습니다!")
         else:
             # 🎯 사이드바가 숨겨졌을 때는 아주 얇은 공간만 유지하거나 비워둡니다.
@@ -578,7 +582,7 @@ elif st.session_state.active_menu == "AI":
     # 🎯 탭 구성: 일간, 주간, 월간
     tabs = st.tabs(["📅 일간 보고서", "🗓️ 주간 보고서", "📊 월간 보고서"])
     r_types = ["daily", "weekly", "monthly"]
-    r_days_map = {"daily": data.get("report_days", 1), "weekly": 7, "monthly": 30}
+    r_days_map = {"daily": 7, "weekly": 14, "monthly": 60}
 
     # 탭별 루프 시작
     for i, tab in enumerate(tabs):
@@ -606,7 +610,8 @@ elif st.session_state.active_menu == "AI":
             st.divider()
 
             # 🚀 보고서 생성 버튼
-            if st.button(f"🚀 새 {r_type.upper()} 보고서 생성 ({r_days}일 분석)", type="primary", width='stretch', key=f"gen_{r_type}"):
+            display_days = 1 if r_type == "daily" else r_days
+            if st.button(f"🚀 새 {r_type.upper()} 보고서 생성 ({display_days}일 분석)", type="primary", width='stretch', key=f"gen_{r_type}"):
                 st.info(f"🔍 시스템 경로 확인 중...")
                 abs_path = os.path.abspath(PENDING_PATH)
                 st.write(f"📍 현재 PENDING_PATH (절대경로): `{abs_path}`")

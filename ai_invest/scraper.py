@@ -3,6 +3,23 @@ from common import *
 
 processed_titles = set()
 
+ANALYSIS_GUIDELINES = """
+1. 수급-심리 연계 분석 (KOSPI & Short-selling)
+- KOSPI 지수의 등락과 3대 주체(개인, 외인, 기관)의 거래대금 흐름을 대조하여 상승/하락의 신뢰도를 측정하라.
+- 공매도 거래량의 급증 여부를 확인하여, 외국인과 기관의 순매수가 진성 매수인지 아니면 공매도 상환(Short Covering)인지 판단하라.
+
+2. 거시경제 및 가격 전이 분석 (Yield & Global)
+- 한국 국고채(3년/10년물) 금리 변동이 성장주 섹터와 외국인 자금 유입에 미치는 영향을 기술하라.
+- 나스닥/S&P500 지수 및 금(GC=F), 환율(USDKRW=X)의 변동이 국내 KOSPI 시장에 어떻게 전이되고 있는지 분석하라.
+
+3. 타격 지점 분석 (Top 10 & Sectors)
+- 개인/외인/기관이 각각 집중 매수한 Top 10 종목을 분석하여, 현재 시장의 자금이 반도체, 2차전지, 금융 등 어떤 섹터로 쏠리고 있는지 정의하라.
+- 시장 전체는 하락하나 특정 주체가 집중 매수하는 '역행 종목'이 있는지 포착하라.
+
+4. 정보 필터링 및 노이즈 제거 (Centralized Filter)
+- 엄격한 정보 선별: common.py에 통합된 전역/개별 필터링 규칙을 준수하여, 스팸성 기사나 중복 뉴스를 배제하고 시장 펀더멘털에 직접적인 영향을 주는 뉴스만 분석 대상에 포함하라.
+"""
+
 def save_file(entry, feed_name):
     """개선된 타임라인 보존 저장 방식 (JSON)"""
     global processed_titles
@@ -51,16 +68,6 @@ def save_file(entry, feed_name):
         print(f"❌ 파일 쓰기 실패: {e}") # 에러 로그를 남겨야 경로 문제를 알 수 있습니다.
         return False
         
-def check_logic(text, inc_list, exc_list):
-    """필터링 로직: 제외어 포함 시 탈락, 포함어 설정 시 포함되어야 통과"""
-    text = text.lower()
-    if any(x in text for x in exc_list if x):
-        return False
-    if inc_list:
-        if not any(i in text for i in inc_list if i):
-            return False
-    return True
-
 def cleanup_old_files(retention_days):
     """설정된 기간보다 오래된 파일 및 메모리 캐시 삭제"""
     global processed_titles
@@ -69,24 +76,55 @@ def cleanup_old_files(retention_days):
     current_time = time.time()
     seconds_threshold = retention_days * 86400
     deleted_count = 0
+    max_files = 600 # 최대 파일 개수 제한
     
-    for filename in os.listdir(PENDING_PATH):
-        file_path = os.path.join(PENDING_PATH, filename)
-        if os.path.isfile(file_path) and (filename.endswith(".json") or filename.endswith(".txt")):
-            if (current_time - os.path.getmtime(file_path)) > seconds_threshold:
-                try:
-                    os.remove(file_path)
-                    deleted_count += 1
-                except: pass
+    # 1. 파일 목록 확보 및 정렬 (오래된 순)
+    files = []
+    for f in os.listdir(PENDING_PATH):
+        fp = os.path.join(PENDING_PATH, f)
+        if os.path.isfile(fp) and (f.endswith(".json") or f.endswith(".txt")):
+            files.append((os.path.getmtime(fp), fp))
+            
+    files.sort(key=lambda x: x[0]) # 오름차순: 오래된 파일 -> 최신 파일
+    
+    # 2. 삭제 수행
+    total_cnt = len(files)
+    for i, (mtime, fp) in enumerate(files):
+        # 삭제 조건: 기간 만료 OR 개수 초과 (남은 파일이 1500개보다 많으면 삭제)
+        if (current_time - mtime > seconds_threshold) or ((total_cnt - i) > max_files):
+            try:
+                os.remove(fp)
+                deleted_count += 1
+            except: pass
+        else:
+            break # 정렬되어 있으므로 이후 파일은 안전
     
     # 파일 삭제 시 메모리 캐시도 함께 비워 시스템을 가볍게 유지
-    processed_titles.clear()
     if deleted_count > 0:
+        processed_titles.clear()
         print(f"🧹 {deleted_count}개의 뉴스 파일을 정리하고 중복 필터를 초기화했습니다.")
 
 
 def generate_auto_report(config_data, r_type):
     """자동 보고서 생성 오케스트레이터"""
+    # 0. 데이터 최신화: 보고서 생성을 위한 시장 데이터 갱신 (마켓 오픈/클로즈 판별)
+    print(f"🔄 [Auto] 보고서 생성을 위한 시장 데이터 갱신 점검...")
+    try:
+        if is_kr_market_open():
+            get_krx_summary_raw(ignore_cache=True)
+        
+        if is_us_market_open():
+            get_global_financials_raw(ignore_cache=True, fetch_type="all")
+        else:
+            get_global_financials_raw(ignore_cache=True, fetch_type="non_equities")
+            
+        get_fed_liquidity_raw()
+    except Exception as e:
+        print(f"⚠️ 데이터 갱신 중 오류 발생 (기존 데이터 사용): {e}")
+
+    # [NEW] 분석 가이드라인 주입 (AI 생성 프롬프트에 반영)
+    config_data['analysis_guidelines'] = ANALYSIS_GUIDELINES
+
     # 1. 데이터 준비 (common.py 활용)
     input_content, label = prepare_report_data(r_type, config_data)
     
@@ -117,6 +155,7 @@ if __name__ == "__main__":
     auto_monthly_done_month = ""
     
     last_news_time = 0
+    first_run = True
 
     try:
         init_config = load_data()
@@ -174,34 +213,38 @@ if __name__ == "__main__":
             time_since_last = current_ts - last_news_time
             next_in = max(0, update_interval_sec - time_since_last)
 
-            if time_since_last >= update_interval_sec:
-                print(f"📡 [{now_kst.strftime('%H:%M:%S')}] 뉴스 수집 엔진 가동 (주기: {update_interval_min}분)")
+            if time_since_last >= update_interval_sec or first_run:
+                print(f"📡 [{now_kst.strftime('%H:%M:%S')}] 뉴스/별도지표 수집 엔진 가동 (주기: {update_interval_min}분)")
                 
-                # 🎯 [NEW] 시장 데이터(KRX, Global, Fed) 자동 수집 및 캐싱
-                # UI에서 설정한 간격에 맞춰 백그라운드에서 데이터를 갱신해둡니다.
-                print(f"📊 [{now_kst.strftime('%H:%M:%S')}] 시장 데이터 자동 갱신 점검 (KRX/Global/Fed)...")
+                # 🎯 [NEW] 시장 데이터(KRX, Global, Fed) 기동 시간 / 휴일 판별 자동 수집
+                need_krx = first_run or is_kr_market_open()
+                need_us = first_run or is_us_market_open()
+
+                print(f"📊 [{now_kst.strftime('%H:%M:%S')}] 시장 데이터 갱신 점검 (첫실행: {first_run}, KRX수집: {need_krx}, US수집: {need_us})...")
                 try:
-                    get_krx_summary_raw(ignore_cache=True)       # KRX (pykrx) - 강제 갱신
-                    get_global_financials_raw(ignore_cache=True) # Global (yfinance) - 강제 갱신
+                    if need_krx:
+                        get_krx_summary_raw(ignore_cache=True)
+                    
+                    if need_us:
+                        get_global_financials_raw(ignore_cache=True, fetch_type="all") # 주식 포함 전체
+                    else:
+                        get_global_financials_raw(ignore_cache=True, fetch_type="non_equities") # 환율/원자재만
+                    
                     get_fed_liquidity_raw()     # Fed (FRED)
                 except Exception as e:
                     print(f"⚠️ 시장 데이터 자동 수집 중 오류: {e}")
 
                 feeds = current_config.get("feeds", [])
-                g_inc = [k.strip().lower() for k in current_config.get('global_include', "").split(",") if k.strip()]
-                g_exc = [k.strip().lower() for k in current_config.get('global_exclude', "").split(",") if k.strip()]
                 
                 new_saved = 0
                 for feed in feeds:
                     try:
                         parsed = feedparser.parse(feed['url'])
-                        l_inc = [k.strip().lower() for k in feed.get('include', "").split(",") if k.strip()]
-                        l_exc = [k.strip().lower() for k in feed.get('exclude', "").split(",") if k.strip()]
                         
                         feed_new = 0
                         for entry in parsed.entries[:50]:
-                            if not check_logic(entry.title, g_inc, g_exc): continue
-                            if not check_logic(entry.title, l_inc, l_exc): continue
+                            if not check_news_filter(entry.title, current_config.get('global_exclude', "")):
+                                continue
                             if save_file(entry, feed['name']):
                                 feed_new += 1
                                 new_saved += 1
@@ -211,7 +254,12 @@ if __name__ == "__main__":
                         print(f"   └─ ❌ {feed.get('name')} 오류: {e}")
                 
                 print(f"✅ [{now_kst.strftime('%H:%M:%S')}] 수집 완료 (총 {new_saved}개 신규 확보)")
+                
+                # 파일 정리 (기간 만료 및 개수 초과 삭제)
+                cleanup_old_files(min(current_config.get("retention_days", 3), 3))
+                
                 last_news_time = current_ts
+                first_run = False
             else:
                 # 매 분마다 정기 생존 신고 로그 (선택 사항)
                 if now_kst.minute % 5 == 0: # 5분마다 출력

@@ -62,6 +62,33 @@ def safe_float(v):
         return float(clean_v) if clean_v else 0.0
     except: return 0.0
 
+def check_keyword_filter(text, exc_list):
+    """
+    통합 필터링 로직: 제외어(Exclude) 포함 시 탈락
+    scraper.py와 app.py에서 공통으로 사용
+    """
+    if not text: return False
+    text = text.lower()
+    
+    exc_list = exc_list or []
+
+    # 1. 제외어(Exclude) 체크
+    if any(x in text for x in exc_list if x):
+        return False
+            
+    return True
+
+def check_news_filter(title, g_exc):
+    """전역 제외 필터만 처리"""
+    if not title: return False
+    title = title.lower()
+    
+    # 1. 제외 필터링 (Global)
+    exc_list = [k.strip().lower() for k in g_exc.split(",") if k.strip()]
+    if any(x in title for x in exc_list): return False
+    
+    return True
+
 def save_to_influx(symbol, data, current_time):
     point = Point("financial_metrics").tag("symbol", symbol)
     for f, v in data.items(): point.field(f, float(v))
@@ -277,17 +304,22 @@ def get_krx_market_data(r_type="daily"):
 
         for code, name in [("1001", "KOSPI"), ("2001", "KOSDAQ")]:
             df = stock.get_index_ohlcv(start_dt, target_date, code)
-            if not df.empty and len(df) >= abs(comp_idx):
+            if not df.empty and len(df) >= 2:
                 curr = float(df.iloc[-1]['종가'])
-                # comp_idx가 범위 내에 있으면 사용, 아니면 가장 첫 데이터 사용
                 prev_idx = comp_idx if len(df) >= abs(comp_idx) else 0
                 prev = float(df.iloc[prev_idx]['종가'])
                 
                 diff = curr - prev
                 pct = (diff / prev) * 100
+                
+                # 시계열 수치 추출 (최대 fetch_days 개)
+                ts_values = [f"{float(val):,.2f}" for val in df['종가'].tolist()]
+                ts_str = " -> ".join(ts_values)
+                
                 summary += f"- {name}: {curr:,.2f} ({pct:+.2f}% / {period_name} 변동)\n"
+                summary += f"  └ 시계열(과거->현재): {ts_str}\n"
     except Exception as e:
-        summary += f"⚠️ 지수 데이터 계산 중 오류: {e}\n"
+        summary += f"⚠️ 지수 데이터 시계열 계산 중 오류: {e}\n"
 
     summary += f"- KOSPI 수급(순매수): 개인 {data.get('KOSPI_Individual',{}).get('val_str','0억')}, 외국인 {data.get('KOSPI_Foreigner',{}).get('val_str','0억')}, 기관 {data.get('KOSPI_Institution',{}).get('val_str','0억')}\n"
     summary += f"- KOSDAQ 수급(순매수): 개인 {data.get('KOSDAQ_Individual',{}).get('val_str','0억')}, 외국인 {data.get('KOSDAQ_Foreigner',{}).get('val_str','0억')}, 기관 {data.get('KOSDAQ_Institution',{}).get('val_str','0억')}\n"
@@ -435,52 +467,86 @@ def get_global_market_data(r_type="daily"):
                         if len(series) < 2: continue
                         
                         curr = float(series.iloc[-1])
-                        # 비교 대상 인덱스 설정 (데이터 부족 시 첫 데이터 사용)
                         target_idx = comp_idx if len(series) >= abs(comp_idx) else 0
                         prev = float(series.iloc[target_idx])
                         
                         chg_pct = ((curr - prev) / prev) * 100
-                        chg_pct = ((curr - start) / start) * 100
+                        
+                        # 시계열 수치 추출 (최대 days 개)
+                        ts_values = [f"{float(val):,.2f}" for val in series.tolist()[-days:]]
+                        ts_str = " -> ".join(ts_values)
+                        
                         report += f"- **{name}**: {curr:,.2f} ({chg_pct:+.2f}%, {days}일 범위: {series.min():,.2f}~{series.max():,.2f})\n"
+                        report += f"  └ 시계열(과거->현재): {ts_str}\n"
                 except: continue
             report += "\n"
         return report
     except Exception as e:
         return f"⚠️ 글로벌 데이터 수집 실패: {e}"
 
-def get_global_financials_raw(ignore_cache=False):
-    """대시보드용 글로벌 지수, 환율, 원자재, 금리 데이터를 통합 수집합니다."""
-    print("🔍 [DEBUG] get_global_financials_raw 진입")
-    if not yf: return {}
+def is_kr_market_open():
+    now = get_now_kst()
+    if now.weekday() >= 5: return False # 토/일 제외
     
-    # 🎯 [NEW] 캐싱 설정 (10분)
+    # 09:00 ~ 15:30 (15시 30분)
+    current_minutes = now.hour * 60 + now.minute
+    if not (540 <= current_minutes <= 930): return False
+    
+    try:
+        from pykrx import stock
+        today_str = now.strftime("%Y%m%d")
+        b_days = stock.get_business_days_dates(today_str, today_str)
+        if len(b_days) == 0: return False
+    except: pass
+    return True
+
+def is_us_market_open():
+    now = get_now_kst()
+    current_minutes = now.hour * 60 + now.minute
+    # 넓은 썸머타임/표준시 구간 포괄: 22:30 ~ 06:00
+    is_open_time = (current_minutes >= 1350) or (current_minutes <= 360) 
+    if not is_open_time: return False
+    
+    if now.weekday() == 6: return False # 일요일 전체 휴장 (KST)
+    if now.weekday() == 0 and current_minutes <= 360: return False # 월요일 새벽 (미국 일요일)
+    if now.weekday() == 5 and current_minutes >= 1350: return False # 토요일 밤 (미국 토/일)
+    return True
+
+def get_global_financials_raw(ignore_cache=False, fetch_type="all"):
+    """대시보드용 글로벌 지수, 환율, 원자재, 금리 데이터를 통합 수집합니다."""
+    print(f"🔍 [DEBUG] get_global_financials_raw 진입 (fetch_type: {fetch_type})")
+    
     cache_dir = os.path.join(BASE_PATH, "cache")
     os.makedirs(cache_dir, exist_ok=True)
     cache_path = os.path.join(cache_dir, "global_financials.json")
     
-    if not ignore_cache and os.path.exists(cache_path):
-        print("🔍 [DEBUG] get_global_financials_raw 캐시 사용")
-        try:
-            if time.time() - os.path.getmtime(cache_path) < 600:
-                with open(cache_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-        except: pass
-    
-    # 주요 티커 매핑
-    tickers = {
-        "S&P500": "^GSPC", "Dow Jones": "^DJI", "Nasdaq": "^IXIC", "VIX": "^VIX",
-        "USD/KRW": "KRW=X", "USD/JPY": "JPY=X", 
-        "WTI": "CL=F", "Gold": "GC=F", "Bitcoin": "BTC-USD",
-        "US10Y": "^TNX", "US2Y": "^IRX" # 미국채 10년, 2년
-    }
-    
     results = {}
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                results = json.load(f)
+            if not ignore_cache and time.time() - os.path.getmtime(cache_path) < 600:
+                print("🔍 [DEBUG] get_global_financials_raw 캐시 사용")
+                return results
+        except: pass
+
+    if not yf: return results
+    
+    tickers = {
+        "USD/KRW": "KRW=X", "USD/JPY": "JPY=X", 
+        "WTI": "CL=F", "Gold": "GC=F", "Bitcoin": "BTC-USD"
+    }
+    if fetch_type == "all":
+        tickers.update({
+            "S&P500": "^GSPC", "Dow Jones": "^DJI", "Nasdaq": "^IXIC", "VIX": "^VIX",
+            "US10Y": "^TNX", "US2Y": "^IRX"
+        })
+    
     try:
         print("🔍 [DEBUG] get_global_financials_raw yfinance 데이터 다운로드 시작")
         end_dt = get_now_kst()
         start_dt = end_dt - timedelta(days=7)
         df = yf.download(list(tickers.values()), start=start_dt.strftime('%Y-%m-%d'), end=end_dt.strftime('%Y-%m-%d'), progress=False)['Close']
-        print("🔍 [DEBUG] get_global_financials_raw yfinance 데이터 다운로드 완료")
 
         for name, sym in tickers.items():
             if sym in df.columns:
@@ -489,7 +555,6 @@ def get_global_financials_raw(ignore_cache=False):
                     curr = float(series.iloc[-1])
                     prev = float(series.iloc[-2])
                     diff = curr - prev
-                    print(f"🔍 [DEBUG] get_global_financials_raw {name} 가격: {curr}, 변화: {diff}")
                     pct = (diff / prev) * 100
                     results[name] = {
                         "price": curr, "diff": diff, "pct": pct,
@@ -498,12 +563,13 @@ def get_global_financials_raw(ignore_cache=False):
                     }
         
         # 캐시 저장
-        print("🔍 [DEBUG] get_global_financials_raw 캐시 저장")
-        if results:
-            with open(cache_path, "w", encoding="utf-8") as f:
-                json.dump(results, f, ensure_ascii=False)
-    except: pass
-    print("🔍 [DEBUG] get_global_financials_raw 완료")
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False)
+        print("🔍 [DEBUG] get_global_financials_raw 캐시 저장 완료")
+    except Exception as e:
+        print(f"⚠️ get_global_financials_raw 다운로드 중 오류: {e}")
+        pass
+        
     return results
 
 def get_fed_liquidity_raw():
@@ -517,7 +583,7 @@ def get_fed_liquidity_raw():
     
     if os.path.exists(cache_path):
         try:
-            if time.time() - os.path.getmtime(cache_path) < 86400: # 24시간
+            if time.time() - os.path.getmtime(cache_path) < 3600: # 1시간 주기로 갱신 변경
                 with open(cache_path, "r", encoding="utf-8") as f:
                     return json.load(f)
         except: pass
@@ -527,12 +593,15 @@ def get_fed_liquidity_raw():
     # (Series ID, 이름, 단위변환계수, 단위문자열)
     indicators = [
         ("RRPONTSYD", "RRP", 1.0, "B$"),
-        ("WRESBAL", "Reserves", 1.0, "B$"),
-        ("WTREGEN", "TGA", 1.0, "B$"),
+        ("WRESBAL", "Reserves", 0.001, "B$"), # 백만 단위 -> B(Billion) 단위 변환
+        ("WTREGEN", "TGA", 0.001, "B$"),
         ("M2SL", "M2", 1.0, "B$"),
         ("CPIAUCSL", "CPI", 1.0, "Idx"),      # 소비자물가지수
         ("UNRATE", "Unemployment", 1.0, "%"), # 실업률
-        ("FEDFUNDS", "FedRate", 1.0, "%")     # 기준금리
+        ("FEDFUNDS", "FedRate", 1.0, "%"),    # 기준금리
+        ("BAMLH0A0HYM2", "HighYield", 1.0, "%"), # 하이일드 스프레드
+        ("T10YIE", "ExpInf", 1.0, "%"),       # 기대인플레이션 (10년)
+        ("GDPNOW", "GDPNow", 1.0, "%")        # 애틀란타 연은 GDP Now
     ]
     
     base_url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={}"
@@ -565,15 +634,21 @@ def get_fed_liquidity_raw():
                             diff = curr_val - prev_val
                             diff_str = f"{diff:+.1f}"
                         
+                        # 두달치(최대 60일) 데이터를 추출하여 5일 간격으로 샘플링
+                        sixty_days_ago = series.index[-1] - pd.Timedelta(days=60)
+                        recent_series = series.loc[series.index >= sixty_days_ago]
+                        ts_values = [f"{float(v * scale):.2f}" for v in recent_series.iloc[::5]]
+
                         # 단위에 따른 포맷팅 미세 조정
-                        fmt = ",.2f" if unit in ["%", "Idx"] else ",.1f"
+                        fmt = ",.2f" if unit in ["%", "Idx", "B$"] else ",.1f"
                         results.append({
                             "name": name, "value": curr_val, "diff": diff, 
                             "diff_str": diff_str, "date": curr_date,
                             "val_str": f"{curr_val:{fmt}}{unit}",
-                            "delta_str": f"{diff_str} (전조)",
+                            "delta_str": f"{diff_str} (직전)",
                             "diff_1y": diff_1y,
-                            "pct_1y": pct_1y
+                            "pct_1y": pct_1y,
+                            "ts_values": ts_values
                         })
                 print(f"🔍 [DEBUG] get_fed_liquidity_raw {name} 로드 완료")
             except Exception as e:
@@ -594,7 +669,8 @@ def get_fed_liquidity_data():
     summary = "### [ 🏦 연준(Fed) 거시/유동성 지표 ]\n"
     try:
         for item in raw_data:
-            summary += f"- **{item['name']}**: {item['val_str']} (전조: {item['diff_str']} | 1년 변동: {item['pct_1y']:+.1f}%)\n"
+            ts_str = ", ".join(item.get('ts_values', []))
+            summary += f"- **{item['name']}**: {item['val_str']} (직전: {item['diff_str']} | 1년 변동: {item['pct_1y']:+.1f}%) | 최근 두달치 추이: [{ts_str}]\n"
         return summary + "\n"
     except Exception as e:
         return f"⚠️ 연준 데이터 수집 중 에러: {e}\n"
@@ -738,23 +814,29 @@ def generate_invest_report(r_type, input_content, config_data):
             f"### [ 상위 주기(주간/월간) 흐름 참조 ]\n{past_weekly}\n{past_monthly}"
         )
         
-        base_prompt = "당신은 미래를 예측하고 대응 전략을 수립하는 '전략가'입니다."
+        base_prompt = "당신은 연금 투자자를 위한 분석을 하는 '연금 자산 설계자' 입니다"
         specific_guideline = (
-            "1. **추세 연속성 확인**: 최근 3일간의 일간 리포트 흐름을 분석하여 단기 추세가 유지되는지 반전되는지 판단하라.\n"
-            "2. **상위 프레임 정렬**: 현재의 단기 움직임이 주간/월간의 큰 흐름과 일치하는지(동조화) 아니면 벗어나는지(이탈) 분석하라.\n"
-            "3. **미래 전략 수립**: 위 분석을 바탕으로 내일의 시장 시나리오를 예측하고, 이에 따른 구체적인 매매 전략을 제시하라."
+            "1. 오늘 시장이 과거의 흐름(주간/월간 맥락)에서 벗어났는지, 아니면 추세를 강화했는지 판단하고 내일의 구체적인 행동 지침을 제시해야 합니다.\n"
+            "2. ### [ 분석 지침 (Daily) ]\n"
+            "3. 각 지표들의 의미도 중요하지만 지표들이 가지는 상관관계를 분석\n"
+            "4. 유동성은 제로섬을 염두하여 분석한다.\n"
+            "5. 연준 발 유동성은 각 연준 지표와 채권발행 또는 매입으로 인한 유동성의 방향을 본다.\n"            
+            "6. 증시와 BTC의 등락과 채권금리와 금을 통해 위험자산과 안전자산의 유동성의 방향을 본다.\n"
+            "7. 달러와 금의 상관관계를 보며 지정학적 리스크를 분석한다.\n"
+            "8. 각 뉴스는 분석하여 중요도가 높은 것을 우선한다."
+            
         )
         structure_instruction = (
             "### [ 일간 보고서 작성 형식 ]\n"
+            "0. 전략 복기\n"
             "1. 시황 브리핑\n"
             "2. 주요 뉴스 및 오피니언: 경제적 영향력이 큰 뉴스나 주요인사 발언\n"
             "3. 유동성 분석: 유동성 관련 지표를 분석하여 현재 유동성 흐름 파악 (예: 한국 -> 미국, 위험 -> 안전, AI -> 바이오)\n"
-            "4. 추세 연속성 분석\n"
-            "5. 증시 분석: 증시 각 산업별 0~5점 분석 및 요약\n"
-            "6. 자산 분석: 증시 외 자산별 0~5점 분석 및 요약\n"
-            "7. 현 주력산업 및 미래유망산업 전망\n"
+            "5. 증시 분석: 증시 각 산업별 0~5점 분석 및 (이전/현재)표로 요약 \n"
+            "6. 자산 분석: 증시 외 자산별 0~5점 분석 및 (이전/현재)표로 요약\n"
+            "7. 현 주력산업 및 미래유망산업 전망: 현 주력산업의 지속가능성 및 미래 유망 산업전망\n"
             "8. 리스크 및 대응: 단기적 위험 요소와 회피 전략\n"
-            "9. 포트폴리오 구성 및 투자 전략"
+            "9. 포트폴리오 구성 및 투자 전략: (이전/현재)표로 요약 및 내일 상승하강 시나리오(확률포함) 구체적인 행동지침(확대/유지/축소)"
         )
         
     elif r_type == "weekly":
@@ -792,9 +874,12 @@ def generate_invest_report(r_type, input_content, config_data):
         f"기준 시각: {now_kst.strftime('%Y-%m-%d %H:%M')}\n\n"
         f"당신은 {base_prompt}이며, 아래 지침을 준수해야 합니다.\n\n"
         f"{analysis_guideline}\n\n"
+        f"--- [ 중요 사항 ] ---\n"
+        f"* 입력된 시장 데이터(KOSPI, 글로벌 지수 등)에는 '시계열(과거->현재)' 변화 흐름이 화살표(->)로 나열되어 있습니다.\n"
+        f"* 이 시계열 추이(Time-series)를 분석하여 해당 기간(7일, 14일, 60일) 동안의 추세(하락 후 반등, 지속 상승 등)를 반드시 파악하고 보고서에 반영하십시오.\n\n"
         f"--- [ 참고 자료 (Context) ] ---\n{historical_context}\n\n"
         f"--- [ 최종 지시 ] ---\n"
-        f"제공된 입력 데이터(Input Data)를 바탕으로 보고서를 작성하세요.\n"
+        f"제공된 시계열 입력 데이터(Input Data)를 바탕으로 보고서를 작성하세요.\n"
         f"{structure_instruction}"
     )
     
