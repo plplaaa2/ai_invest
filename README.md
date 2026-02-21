@@ -42,7 +42,15 @@ AI가 만든 투자 보고서는 참고 자료일 뿐이며 생성된 보고서�
 - **Backend**: Python 3.9+
 - **LLM**: Ollama (Local), Google Gemini (Cloud), OpenAI GPT (Cloud)
 - **Data Storage**: Local Text Files (Flat-file DB System)
+- **Data collect**: Pykrx, Yfinance
+---
 
+## 데이터 저작권
+
+ - 모든 금융데이터는 사용자의 로컬환경에서 pykrx 및 yfinance 라이브를 통해 실시간으로 호출 됩니다.
+ - 각 데이터의 저작권은 한국거래소, 네이버금융, Yahoo Finance 등 원천제공처에 있습니다.
+ - 본 도구를 상업적 목적으로 이용하거나 데이터를 무단 재배포하여 발생하는 모든 법적 책임은 사용자 본인에게 있습니다.
+ - 개발자는 본 소프트웨어의 사용으로 인해 발생하는 어떠한 손실이나 손해에 대해서도 책임을 지지 않습니다.
 ---
 
 ## ⚙️ 설정 가이드 (Configuration)
