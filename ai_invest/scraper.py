@@ -3,23 +3,6 @@ from common import *
 
 processed_titles = set()
 
-ANALYSIS_GUIDELINES = """
-1. 수급-심리 연계 분석 (KOSPI & Short-selling)
-- KOSPI 지수의 등락과 3대 주체(개인, 외인, 기관)의 거래대금 흐름을 대조하여 상승/하락의 신뢰도를 측정하라.
-- 공매도 거래량의 급증 여부를 확인하여, 외국인과 기관의 순매수가 진성 매수인지 아니면 공매도 상환(Short Covering)인지 판단하라.
-
-2. 거시경제 및 가격 전이 분석 (Yield & Global)
-- 한국 국고채(3년/10년물) 금리 변동이 성장주 섹터와 외국인 자금 유입에 미치는 영향을 기술하라.
-- 나스닥/S&P500 지수 및 금(GC=F), 환율(USDKRW=X)의 변동이 국내 KOSPI 시장에 어떻게 전이되고 있는지 분석하라.
-
-3. 타격 지점 분석 (Top 10 & Sectors)
-- 개인/외인/기관이 각각 집중 매수한 Top 10 종목을 분석하여, 현재 시장의 자금이 반도체, 2차전지, 금융 등 어떤 섹터로 쏠리고 있는지 정의하라.
-- 시장 전체는 하락하나 특정 주체가 집중 매수하는 '역행 종목'이 있는지 포착하라.
-
-4. 정보 필터링 및 노이즈 제거 (Centralized Filter)
-- 엄격한 정보 선별: common.py에 통합된 전역/개별 필터링 규칙을 준수하여, 스팸성 기사나 중복 뉴스를 배제하고 시장 펀더멘털에 직접적인 영향을 주는 뉴스만 분석 대상에 포함하라.
-"""
-
 def save_file(entry, feed_name):
     """개선된 타임라인 보존 저장 방식 (JSON)"""
     global processed_titles
@@ -121,9 +104,6 @@ def generate_auto_report(config_data, r_type):
         get_fed_liquidity_raw()
     except Exception as e:
         print(f"⚠️ 데이터 갱신 중 오류 발생 (기존 데이터 사용): {e}")
-
-    # [NEW] 분석 가이드라인 주입 (AI 생성 프롬프트에 반영)
-    config_data['analysis_guidelines'] = ANALYSIS_GUIDELINES
 
     # 1. 데이터 준비 (common.py 활용)
     input_content, label = prepare_report_data(r_type, config_data)
