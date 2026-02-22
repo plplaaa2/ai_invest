@@ -1,6 +1,6 @@
 name: "AI Invest Lite Add-on"
 description: "AI 시황 분석기"
-version: "4.0"
+version: "4.1"
 url: "https://github.com/plplaaa2/ai_invest"
 slug: "ai_invest_lite"
 arch:
@@ -24,4 +24,5 @@ schema:
   web_port: int            # Streamlit 웹 UI 포트
   openai_api_key: password?      
   gemini_api_key: password?
+
 
