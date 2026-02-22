@@ -190,7 +190,7 @@ if __name__ == "__main__":
 
     def _load_config_if_changed():
         """설정 파일이 변경된 경우에만 다시 로드합니다 (디스크 I/O 최소화)"""
-        nonlocal _config_mtime, _cached_config, _cached_base_time, _cached_weekly_time, _cached_monthly_time
+        global _config_mtime, _cached_config, _cached_base_time, _cached_weekly_time, _cached_monthly_time
         try:
             mt = os.path.getmtime(CONFIG_PATH) if os.path.exists(CONFIG_PATH) else 0
         except:
