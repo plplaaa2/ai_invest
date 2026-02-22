@@ -564,7 +564,14 @@ def get_global_financials_raw(ignore_cache=False, fetch_type="all"):
                         "delta_str": f"{diff:+.2f} ({pct:+.2f}%)"
                     }
         
-        # 캐시 저장
+        # 캐시 저장 (non_equities 모드일 때 기존 주식 데이터 보존)
+        if fetch_type != "all" and os.path.exists(cache_path):
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+                existing.update(results)  # 새 데이터로 덮어쓰되, 기존 주식 데이터는 보존
+                results = existing
+            except: pass
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False)
         print("🔍 [DEBUG] get_global_financials_raw 캐시 저장 완료")
@@ -777,7 +784,9 @@ def prepare_report_data(r_type, config_data):
                         try: f_dt = datetime.strptime(pub_dt_str, '%Y-%m-%d %H:%M:%S').date()
                         except: f_dt = now_kst.date()
                         if f_dt < target_date_limit: continue
-                        clean_key = title.replace("[특징주]", "").replace("[속보]", "").replace(" ", "")[:18]
+                        # scraper.py와 동일한 MD5 해시 기반 중복 방지
+                        import hashlib
+                        clean_key = hashlib.md5(title.encode()).hexdigest()[:16]
                         if clean_key not in seen_keys:
                             seen_keys.add(clean_key)
                             raw_news_list.append(f"[{pub_dt_str[5:16]}] {title}")

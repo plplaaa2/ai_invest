@@ -1,7 +1,52 @@
 import hashlib
 from common import *
 
-processed_titles = set()
+processed_titles = {}  # {clean_key: timestamp} - 3일 TTL 기반 중복 캐시
+CACHE_TTL = 3 * 86400  # 3일 (초)
+
+
+def init_processed_cache():
+    """기존 파일에서 중복 캐시를 복원합니다 (재시작 시 중복 수집 방지)"""
+    global processed_titles
+    if not os.path.exists(PENDING_PATH):
+        return
+    
+    current_time = time.time()
+    count = 0
+    
+    for f in os.listdir(PENDING_PATH):
+        fp = os.path.join(PENDING_PATH, f)
+        if not (os.path.isfile(fp) and f.endswith(".json")):
+            continue
+        
+        # 3일보다 오래된 파일은 캐시에 넣지 않음
+        mtime = os.path.getmtime(fp)
+        if current_time - mtime > CACHE_TTL:
+            continue
+            
+        try:
+            with open(fp, "r", encoding="utf-8") as file:
+                news_data = json.load(file)
+                title = news_data.get("title", "").strip()
+                pub_dt_str = news_data.get("pub_dt", "")
+                if not title:
+                    continue
+                
+                try:
+                    dt_obj = datetime.strptime(pub_dt_str, '%Y-%m-%d %H:%M:%S')
+                    date_key = dt_obj.strftime('%Y%m%d')
+                except:
+                    date_key = "unknown"
+                
+                clean_key = f"{date_key}_{hashlib.md5(title.encode()).hexdigest()[:12]}"
+                processed_titles[clean_key] = mtime
+                count += 1
+        except:
+            continue
+    
+    print(f"🔄 중복 캐시 복원 완료: {count}개 항목 로드됨 (3일 이내)")
+
+
 
 def save_file(entry, feed_name):
     """개선된 타임라인 보존 저장 방식 (JSON)"""
@@ -20,9 +65,8 @@ def save_file(entry, feed_name):
     date_key = dt_obj.strftime('%Y%m%d')     # 일별 중복 분리용
     pub_dt_str = dt_obj.strftime('%Y-%m-%d %H:%M:%S') # 데이터 저장용
     
-    # 🎯 2. 중복 체크 키 강화 (날짜 + 제목 15자)
-    # 이제 날짜가 다르면 같은 제목이라도 별개 뉴스로 수집합니다.
-    clean_key = f"{date_key}_{title.replace(' ', '')[:15]}"
+    # 🎯 2. 중복 체크 키 (날짜 + 제목 MD5 해시 - 충돌 방지)
+    clean_key = f"{date_key}_{hashlib.md5(title.encode()).hexdigest()[:12]}"
     
     if clean_key in processed_titles:
         return False
@@ -45,7 +89,7 @@ def save_file(entry, feed_name):
         os.makedirs(PENDING_PATH, exist_ok=True)
         with open(filepath, "w", encoding='utf-8') as f:
             json.dump(news_data, f, ensure_ascii=False, indent=2)
-        processed_titles.add(clean_key)
+        processed_titles[clean_key] = time.time()
         return True
     except Exception as e:
         print(f"❌ 파일 쓰기 실패: {e}") # 에러 로그를 남겨야 경로 문제를 알 수 있습니다.
@@ -82,10 +126,12 @@ def cleanup_old_files(retention_days):
         else:
             break # 정렬되어 있으므로 이후 파일은 안전
     
-    # 파일 삭제 시 메모리 캐시도 함께 비워 시스템을 가볍게 유지
-    if deleted_count > 0:
-        processed_titles.clear()
-        print(f"🧹 {deleted_count}개의 뉴스 파일을 정리하고 중복 필터를 초기화했습니다.")
+    # 만료된 캐시 항목만 선택적 제거 (3일 TTL)
+    expired_keys = [k for k, t in processed_titles.items() if current_time - t > CACHE_TTL]
+    for k in expired_keys:
+        del processed_titles[k]
+    if deleted_count > 0 or expired_keys:
+        print(f"🧹 파일 {deleted_count}개 정리, 만료 캐시 {len(expired_keys)}개 제거 (캐시 잔여: {len(processed_titles)}개)")
 
 
 def generate_auto_report(config_data, r_type):
@@ -136,27 +182,51 @@ if __name__ == "__main__":
     
     last_news_time = 0
     first_run = True
+    _config_mtime = 0  # 설정 파일 변경 감지용
+    _cached_config = None
+    _cached_base_time = None  # 예약 시각 캐시
+    _cached_weekly_time = None
+    _cached_monthly_time = None
+
+    def _load_config_if_changed():
+        """설정 파일이 변경된 경우에만 다시 로드합니다 (디스크 I/O 최소화)"""
+        nonlocal _config_mtime, _cached_config, _cached_base_time, _cached_weekly_time, _cached_monthly_time
+        try:
+            mt = os.path.getmtime(CONFIG_PATH) if os.path.exists(CONFIG_PATH) else 0
+        except:
+            mt = 0
+        if mt != _config_mtime or _cached_config is None:
+            _config_mtime = mt
+            _cached_config = load_data()
+            # 예약 시각도 설정 변경 시에만 재계산
+            base_time_str = str(_cached_config.get("report_gen_time", "08:00")).strip()
+            base_dt = datetime.strptime(base_time_str, "%H:%M")
+            _cached_base_time = base_time_str
+            _cached_weekly_time = (base_dt + timedelta(minutes=10)).strftime("%H:%M")
+            _cached_monthly_time = (base_dt + timedelta(minutes=20)).strftime("%H:%M")
+        return _cached_config
 
     try:
-        init_config = load_data()
+        init_config = _load_config_if_changed()
         print(f"🚀 [AI Analyst] 시스템 가동 - 기준 시각: {init_config.get('report_gen_time', '08:00')} (KST)")
     except Exception as e:
         print(f"❌ 초기 설정 로드 실패: {e}")
 
+    init_processed_cache()
+
     while True:
         try:
             now_kst = get_now_kst()
-            current_ts = time.time() # 🚨 NameError 해결
-            current_config = load_data()
+            current_ts = time.time()
+            current_config = _load_config_if_changed()
             
             auto_gen_enabled = current_config.get("report_auto_gen", False)
-            base_time_str = str(current_config.get("report_gen_time", "08:00")).strip()
             current_time_str = now_kst.strftime("%H:%M")
             
-            # 예약 시각 계산 (10분/20분 간격)
-            base_dt = datetime.strptime(base_time_str, "%H:%M")
-            weekly_time_str = (base_dt + timedelta(minutes=10)).strftime("%H:%M")
-            monthly_time_str = (base_dt + timedelta(minutes=20)).strftime("%H:%M")
+            # 예약 시각 (설정 변경 시에만 재계산됨)
+            base_time_str = _cached_base_time
+            weekly_time_str = _cached_weekly_time
+            monthly_time_str = _cached_monthly_time
 
             # --- [ 🤖 자동 보고서 생성 섹션 ] ---
             if auto_gen_enabled:
@@ -215,6 +285,7 @@ if __name__ == "__main__":
                     print(f"⚠️ 시장 데이터 자동 수집 중 오류: {e}")
 
                 feeds = current_config.get("feeds", [])
+                g_exc_str = current_config.get('global_exclude', "")  # 루프 밖에서 한 번만 가져옴
                 
                 new_saved = 0
                 for feed in feeds:
@@ -223,7 +294,7 @@ if __name__ == "__main__":
                         
                         feed_new = 0
                         for entry in parsed.entries[:50]:
-                            if not check_news_filter(entry.title, current_config.get('global_exclude', "")):
+                            if not check_news_filter(entry.title, g_exc_str):
                                 continue
                             if save_file(entry, feed['name']):
                                 feed_new += 1
