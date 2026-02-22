@@ -3,7 +3,6 @@ from common import *
 
 processed_titles = set()
 
-
 def save_file(entry, feed_name):
     """개선된 타임라인 보존 저장 방식 (JSON)"""
     global processed_titles
