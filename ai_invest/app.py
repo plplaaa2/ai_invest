@@ -76,15 +76,19 @@ def load_pending_files(range_type, target_feed=None):
     
     parse_fail = 0
     filter_fail = 0
+    
+    # 전역 제외 필터를 루프 밖에서 한 번만 로드
+    config_data = load_data()
+    exc_list = [t.strip().lower() for t in config_data.get('global_exclude', "").split(",") if t.strip()]
 
     for filename in target_files:
         fpath = os.path.join(PENDING_PATH, filename)
         try:
             with open(fpath, 'r', encoding='utf-8') as f:
                 if filename.endswith(".json"):
-                    data = json.load(f)
-                    title = data.get('title', '제목 없음')
-                    pub_str = data.get('pub_dt', '')
+                    news_data = json.load(f)
+                    title = news_data.get('title', '제목 없음')
+                    pub_str = news_data.get('pub_dt', '')
                     
                     # 🎯 날짜 파싱 강화 (pub_dt_str 형식: %Y-%m-%d %H:%M:%S)
                     try:
@@ -93,9 +97,9 @@ def load_pending_files(range_type, target_feed=None):
                         # 파싱 실패 시 파일 수정 시간으로 강제 복구
                         pub_dt = datetime.fromtimestamp(os.path.getmtime(fpath))
                     
-                    link = data.get('link', '')
-                    summary = data.get('summary', '')
-                    source = data.get('source', '저장된 데이터')
+                    link = news_data.get('link', '')
+                    summary = news_data.get('summary', '')
+                    source = news_data.get('source', '저장된 데이터')
                 else:
                     lines = f.read().splitlines()
                     if len(lines) < 3: continue
@@ -118,8 +122,7 @@ def load_pending_files(range_type, target_feed=None):
                     filter_fail += 1
                     continue
                 
-                # 개별/전역 포함 필터 제거됨, 전역 제외 필터만 검사
-                exc_list = [t.strip().lower() for t in data.get('global_exclude', "").split(",") if t.strip()]
+                # 전역 제외 필터 검사
                 if not check_keyword_filter(title, exc_list):
                     filter_fail += 1
                     continue
@@ -675,7 +678,6 @@ elif st.session_state.active_menu == "AI":
     report_to_download = st.session_state.get('last_report_content', "아직 생성된 보고서가 없습니다.")
 
     def create_pdf_data(text):
-        from fpdf import FPDF
         pdf = FPDF()
         pdf.add_page()
         
@@ -696,13 +698,18 @@ elif st.session_state.active_menu == "AI":
 
     # --- 다운로드 버튼 부분 ---
     try:
-        import datetime
-        current_date_str = datetime.datetime.now().strftime('%Y%m%d')
+        current_date_str = get_now_kst().strftime('%Y%m%d')
+        
+        # 🎯 PDF 세션 캐시: 보고서 내용이 변경된 경우에만 재생성
+        cache_key = hash(report_to_download)
+        if 'pdf_cache_key' not in st.session_state or st.session_state.pdf_cache_key != cache_key:
+            st.session_state.pdf_cache_key = cache_key
+            st.session_state.pdf_cache_data = create_pdf_data(report_to_download)
         
         # 버튼을 누르면 위 함수가 실행되어 bytes 데이터를 반환합니다.
         st.download_button(
             label="📥 현재 보고서 PDF 다운로드",
-            data=create_pdf_data(report_to_download),
+            data=st.session_state.pdf_cache_data,
             file_name=f"Report_{current_date_str}.pdf",
             mime="application/pdf",
             use_container_width=True
