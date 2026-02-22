@@ -789,7 +789,11 @@ def prepare_report_data(r_type, config_data):
                         clean_key = hashlib.md5(title.encode()).hexdigest()[:16]
                         if clean_key not in seen_keys:
                             seen_keys.add(clean_key)
-                            raw_news_list.append(f"[{pub_dt_str[5:16]}] {title}")
+                            summary = news_data.get("summary", "").strip()
+                            if summary and summary != "내용 없음":
+                                raw_news_list.append(f"[{pub_dt_str[5:16]}] {title} — {summary[:200]}")
+                            else:
+                                raw_news_list.append(f"[{pub_dt_str[5:16]}] {title}")
                         if len(raw_news_list) >= news_count: break
                 except: continue
         
